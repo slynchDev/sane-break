@@ -1552,6 +1552,13 @@ All color are in &lt;code&gt;#AARRGGBB&lt;/code&gt; format.</string>
              </widget>
             </item>
             <item>
+             <widget class="QCheckBox" name="autoMeetingOnAppCheck">
+              <property name="text">
+               <string>Enter meeting mode when monitored app is detected</string>
+              </property>
+             </widget>
+            </item>
+            <item>
              <widget class="QLabel" name="externalMonitorsLabel">
               <property name="text">
                <string>&lt;h3&gt;External Monitors&lt;/h3&gt;</string>

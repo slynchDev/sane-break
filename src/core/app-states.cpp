@@ -104,9 +104,18 @@ void AppStateNormal::onIdleStart(AppContext* app) {
   app->data->addPauseReasons(PauseReason::Idle);
   app->transitionTo(std::make_unique<AppStatePaused>());
 }
-void AppStateNormal::onPauseRequest(AppContext* app, PauseReasons) {
+void AppStateNormal::onPauseRequest(AppContext* app, PauseReasons reasons) {
   // When in postpone mode, disable pausing
   if (app->data->isPostponing()) return;
+  // If auto-meeting is enabled and pause is due to a monitored app, enter meeting mode
+  if (reasons.testFlag(PauseReason::AppOpen) &&
+      app->preferences->autoMeetingOnApp->get()) {
+    app->data->removePauseReasons(PauseReason::AppOpen);
+    app->data->resetPostpone();
+    app->data->setIndefiniteMeetingData(QObject::tr("App detected"));
+    app->transitionTo(std::make_unique<AppStateMeeting>());
+    return;
+  }
   app->transitionTo(std::make_unique<AppStatePaused>());
 }
 void AppStateNormal::onMenuAction(AppContext* app, MenuAction action) {
@@ -379,6 +388,11 @@ void AppStateMeeting::exit(AppContext* app) {
 }
 
 void AppStateMeeting::tick(AppContext* app) {
+  // Indefinite meetings count up elapsed time; no countdown or auto-end
+  if (app->data->isMeetingIndefinite()) {
+    app->data->tickMeetingElapsed();
+    return;
+  }
   if (app->data->meetingSecondsRemaining() > 0) app->data->tickMeetingRemaining();
   int remaining = app->data->meetingSecondsRemaining();
   if (remaining > 0 && remaining <= 60) {
@@ -409,6 +423,13 @@ void AppStateMeeting::onMenuAction(AppContext* app, MenuAction action) {
   }
 }
 bool AppStateMeeting::onSleepEnd(AppContext* app, int sleptSeconds) {
+  // Indefinite meetings survive sleep — just reopen the span
+  if (app->data->isMeetingIndefinite()) {
+    app->openCurrentSpan("meeting",
+                         {{"indefinite", true},
+                          {"reason", app->data->meetingReason()}});
+    return true;
+  }
   int breakDuration = app->data->effectiveBigBreakEnabled()
                           ? app->data->effectiveBigFor()
                           : app->data->effectiveSmallFor();

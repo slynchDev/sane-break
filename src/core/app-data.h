@@ -23,6 +23,7 @@ struct PostponeData {
 
 struct MeetingData {
   bool isActive = false;
+  bool isIndefinite = false;
   int secondsRemaining = 0;
   int totalSeconds = 0;
   QString reason;
@@ -66,12 +67,15 @@ class AppData : public QObject {
   void earlyBreak();
 
   bool isInMeeting() const;
+  bool isMeetingIndefinite() const;
   int meetingSecondsRemaining() const;
   int meetingTotalSeconds() const;
   QString meetingReason() const;
   void setMeetingData(int secondsRemaining, int totalSeconds, const QString& reason);
+  void setIndefiniteMeetingData(const QString& reason);
   void clearMeetingData();
   void tickMeetingRemaining();
+  void tickMeetingElapsed();
   void subtractMeetingRemaining(int secs);
   void extendMeeting(int secs);
 

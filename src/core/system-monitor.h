@@ -20,4 +20,5 @@ class AbstractSystemMonitor : public QObject {
   void sleepEnded(int sleptSeconds);
   void pauseRequested(PauseReason reason);
   void resumeRequested(PauseReason reason);
+  void programStopped();
 };

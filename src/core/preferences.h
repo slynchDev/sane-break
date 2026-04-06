@@ -134,6 +134,7 @@ class SanePreferences : public QObject {
   Setting<int>* resetCycleAfterPause;
   Setting<bool>* pauseOnBattery;
   Setting<QStringList>* programsToMonitor;
+  Setting<bool>* autoMeetingOnApp;
   Setting<bool>* pauseOnUnknownMonitor;
   Setting<QStringList>* knownMonitors;
 

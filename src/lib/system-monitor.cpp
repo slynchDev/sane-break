@@ -34,7 +34,10 @@ SystemMonitor::SystemMonitor(SanePreferences* preferences, QObject* parent)
   connect(runningProgramsMonitor, &RunningProgramsMonitor::programStarted, this,
           [this]() { emit pauseRequested(PauseReason::AppOpen); });
   connect(runningProgramsMonitor, &RunningProgramsMonitor::programStopped, this,
-          [this]() { emit resumeRequested(PauseReason::AppOpen); });
+          [this]() {
+            emit resumeRequested(PauseReason::AppOpen);
+            emit programStopped();
+          });
 
   connect(preferences->programsToMonitor, &SettingWithSignal::changed, this, [this]() {
     runningProgramsMonitor->setPrograms(this->preferences->programsToMonitor->get());

@@ -117,7 +117,8 @@ void StatusTrayWindow::update(TrayData data) {
                           !data.isPostponing && !data.isFocusMode);
   endFocusAction->setVisible(data.isFocusMode && !data.isBreaking);
   endMeetingAction->setVisible(data.isInMeeting);
-  extendMeetingMenu->menuAction()->setVisible(data.isInMeeting);
+  extendMeetingMenu->menuAction()->setVisible(data.isInMeeting &&
+                                              !data.isMeetingIndefinite);
 
   if (data.isFocusMode && !data.isInMeeting) {
     int cyclesDone = data.focusTotalCycles - data.focusCyclesRemaining;
@@ -130,12 +131,21 @@ void StatusTrayWindow::update(TrayData data) {
                  .arg(cyclesDone)
                  .arg(data.focusTotalCycles));
   } else if (data.isInMeeting) {
-    QTime meetingEndTime = QTime::currentTime().addSecs(data.meetingSecondsRemaining);
-    QString endTimeStr = QLocale().toString(meetingEndTime, QLocale::ShortFormat);
+    if (data.isMeetingIndefinite) {
+      endMeetingAction->setText(tr("Exit meeting && break now"));
+      QString reason = data.meetingReason.isEmpty() ? tr("app running")
+                                                    : data.meetingReason;
+      setTitle(tr("Meeting mode — %1 (%2 elapsed)")
+                   .arg(reason, formatTime(data.meetingTotalSeconds)));
+    } else {
+      QTime meetingEndTime =
+          QTime::currentTime().addSecs(data.meetingSecondsRemaining);
+      QString endTimeStr = QLocale().toString(meetingEndTime, QLocale::ShortFormat);
 
-    endMeetingAction->setText(tr("Exit meeting (%1)").arg(endTimeStr));
-    setTitle(tr("Meeting mode — until %1 (%2 left)")
-                 .arg(endTimeStr, formatTime(data.meetingSecondsRemaining)));
+      endMeetingAction->setText(tr("Exit meeting (%1)").arg(endTimeStr));
+      setTitle(tr("Meeting mode — until %1 (%2 left)")
+                   .arg(endTimeStr, formatTime(data.meetingSecondsRemaining)));
+    }
   } else if (data.pauseReasons) {
     if (data.pauseReasons.testFlag(PauseReason::OnBattery)) {
       setTitle(tr("Paused on battery"));
@@ -163,6 +173,13 @@ TrayIconSpec trayIconSpec(TrayData data) {
             .dot = std::nullopt};
 
   if (data.isInMeeting) {
+    if (data.isMeetingIndefinite) {
+      return {
+          .baseIcon = ":/images/icon-meeting.png",
+          .arc = std::nullopt,
+          .dot = std::nullopt,
+      };
+    }
     float arcRatio =
         data.meetingTotalSeconds > 0
             ? float(data.meetingSecondsRemaining) / data.meetingTotalSeconds

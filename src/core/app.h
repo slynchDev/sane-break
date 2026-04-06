@@ -37,8 +37,10 @@ struct TrayData {
   bool bigBreakEnabled;
   PauseReasons pauseReasons;
   bool isInMeeting;
+  bool isMeetingIndefinite;
   int meetingSecondsRemaining;
   int meetingTotalSeconds;
+  QString meetingReason;
   bool isPostponing;
   bool isFocusMode;
   int focusCyclesRemaining;
@@ -61,6 +63,7 @@ class AbstractApp : public AppContext {
   void enableBreak();
 
   void startMeeting(int seconds, const QString& reason);
+  void startIndefiniteMeeting(const QString& reason);
   void endMeetingBreakNow();
   void endMeetingBreakLater(int seconds);
   void extendMeeting(int seconds);

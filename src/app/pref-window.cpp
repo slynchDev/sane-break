@@ -393,10 +393,14 @@ PreferenceWindow::PreferenceWindow(SanePreferences* preferences, QWidget* parent
 #ifdef LINUX_DIST_FLATPAK
   ui->programList->setHidden(true);
   ui->programListLabel->setHidden(true);
+  ui->autoMeetingOnAppCheck->setHidden(true);
 #else
   controllers->add(PrefGroup::Pause,
                    new PrefController<QPlainTextEdit, QStringList>(
                        ui->programList, preferences->programsToMonitor));
+  controllers->add(PrefGroup::Pause,
+                   new PrefController<QCheckBox, bool>(
+                       ui->autoMeetingOnAppCheck, preferences->autoMeetingOnApp));
 #endif
 
   auto pauseOnUnknownMonitorController = controllers->add(

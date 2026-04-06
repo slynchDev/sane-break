@@ -97,6 +97,8 @@ SanePreferences::SanePreferences(QSettings* settings, QObject* parent)
   pauseOnBattery = new Setting<bool>(settings, "pause/on-battery", false);
   programsToMonitor =
       new Setting<QStringList>(settings, "pause/programs-to-monitor", QStringList());
+  autoMeetingOnApp =
+      new Setting<bool>(settings, "pause/auto-meeting-on-app", false);
   pauseOnUnknownMonitor =
       new Setting<bool>(settings, "pause/on-unknown-monitor", false);
   knownMonitors =

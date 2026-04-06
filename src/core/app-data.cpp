@@ -134,6 +134,7 @@ void AppData::clearPauseReasons() {
 }
 void MeetingData::clear() {
   isActive = false;
+  isIndefinite = false;
   secondsRemaining = 0;
   totalSeconds = 0;
   reason.clear();
@@ -146,14 +147,24 @@ void FocusData::clear() {
   spanId = -1;
 }
 bool AppData::isInMeeting() const { return m_meetingData.isActive; }
+bool AppData::isMeetingIndefinite() const { return m_meetingData.isIndefinite; }
 int AppData::meetingSecondsRemaining() const { return m_meetingData.secondsRemaining; }
 int AppData::meetingTotalSeconds() const { return m_meetingData.totalSeconds; }
 QString AppData::meetingReason() const { return m_meetingData.reason; }
 void AppData::setMeetingData(int secondsRemaining, int totalSeconds,
                              const QString& reason) {
   m_meetingData.isActive = true;
+  m_meetingData.isIndefinite = false;
   m_meetingData.secondsRemaining = secondsRemaining;
   m_meetingData.totalSeconds = totalSeconds;
+  m_meetingData.reason = reason;
+  emit changed();
+}
+void AppData::setIndefiniteMeetingData(const QString& reason) {
+  m_meetingData.isActive = true;
+  m_meetingData.isIndefinite = true;
+  m_meetingData.secondsRemaining = 0;
+  m_meetingData.totalSeconds = 0;
   m_meetingData.reason = reason;
   emit changed();
 }
@@ -163,6 +174,10 @@ void AppData::clearMeetingData() {
 }
 void AppData::tickMeetingRemaining() {
   m_meetingData.secondsRemaining--;
+  emit changed();
+}
+void AppData::tickMeetingElapsed() {
+  m_meetingData.totalSeconds++;
   emit changed();
 }
 void AppData::subtractMeetingRemaining(int secs) {

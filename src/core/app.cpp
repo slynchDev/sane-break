@@ -65,6 +65,12 @@ AbstractApp::AbstractApp(const AppDependencies& deps, QObject* parent)
   connect(breakWindows, &AbstractBreakWindows::startBreakRequested, this,
           &AbstractApp::breakNow);
 
+  connect(m_systemMonitor, &AbstractSystemMonitor::programStopped, this, [this]() {
+    if (data->isInMeeting() && data->isMeetingIndefinite()) {
+      endMeetingBreakNow();
+    }
+  });
+
   connect(preferences->pauseOnBattery, &SettingWithSignal::changed, this,
           &AbstractApp::onBatterySettingChange);
   connect(preferences->smallEvery, &SettingWithSignal::changed, this, [this]() {
@@ -106,8 +112,10 @@ void AbstractApp::updateTray() {
       .bigBreakEnabled = bigEnabled,
       .pauseReasons = data->pauseReasons(),
       .isInMeeting = data->isInMeeting(),
+      .isMeetingIndefinite = data->isMeetingIndefinite(),
       .meetingSecondsRemaining = data->meetingSecondsRemaining(),
       .meetingTotalSeconds = data->meetingTotalSeconds(),
+      .meetingReason = data->meetingReason(),
       .isPostponing = data->isPostponing(),
       .isFocusMode = data->isFocusMode(),
       .focusCyclesRemaining = data->focusCyclesRemaining(),
@@ -145,6 +153,17 @@ void AbstractApp::startMeeting(int seconds, const QString& reason) {
     data->endFocusMode();
   }
   data->setMeetingData(seconds, seconds, reason);
+  transitionTo(std::make_unique<AppStateMeeting>());
+}
+
+void AbstractApp::startIndefiniteMeeting(const QString& reason) {
+  if (m_currentState->getID() == AppState::Meeting) return;
+  data->resetPostpone();
+  if (data->isFocusMode()) {
+    db->closeSpan(data->focusSpanId(), {{"reason", "meeting"}});
+    data->endFocusMode();
+  }
+  data->setIndefiniteMeetingData(reason);
   transitionTo(std::make_unique<AppStateMeeting>());
 }
 
