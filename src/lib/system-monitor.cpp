@@ -32,10 +32,14 @@ SystemMonitor::SystemMonitor(SanePreferences* preferences, QObject* parent)
       emit resumeRequested(PauseReason::OnBattery);
   });
   connect(runningProgramsMonitor, &RunningProgramsMonitor::programStarted, this,
-          [this]() { emit pauseRequested(PauseReason::AppOpen); });
+          [this]() {
+            if (!this->preferences->autoMeetingOnApp->get())
+              emit pauseRequested(PauseReason::AppOpen);
+          });
   connect(runningProgramsMonitor, &RunningProgramsMonitor::programStopped, this,
           [this]() {
-            emit resumeRequested(PauseReason::AppOpen);
+            if (!this->preferences->autoMeetingOnApp->get())
+              emit resumeRequested(PauseReason::AppOpen);
             emit programStopped();
           });
   connect(runningProgramsMonitor, &RunningProgramsMonitor::meetingStarted, this,
