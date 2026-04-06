@@ -30,19 +30,28 @@ void RunningProgramsMonitor::setPrograms(const QStringList& programs) {
   tick();
 }
 
-void RunningProgramsMonitor::tick() {
-  if (programsToMonitor.isEmpty()) return;
-
-  bool currentlySeen = false;
-  for (const QString& program : runningPrograms()) {
-    for (const QString& entry : std::as_const(programsToMonitor)) {
-      if (program.contains(entry, Qt::CaseInsensitive)) {
-        currentlySeen = true;
-        break;
+static bool matchesAny(const QStringList& haystack, const QStringList& needles) {
+  for (const QString& item : haystack) {
+    for (const QString& entry : needles) {
+      if (item.contains(entry, Qt::CaseInsensitive)) {
+        return true;
       }
     }
   }
+  return false;
+}
+
+void RunningProgramsMonitor::tick() {
+  if (programsToMonitor.isEmpty()) return;
+
+  bool currentlySeen = matchesAny(runningPrograms(), programsToMonitor);
   if (!previouslySeen && currentlySeen) emit programStarted();
   if (previouslySeen && !currentlySeen) emit programStopped();
   previouslySeen = currentlySeen;
+
+  bool currentlyInMeeting =
+      currentlySeen && matchesAny(activeAudioPrograms(), programsToMonitor);
+  if (!previouslyInMeeting && currentlyInMeeting) emit meetingStarted();
+  if (previouslyInMeeting && !currentlyInMeeting) emit meetingStopped();
+  previouslyInMeeting = currentlyInMeeting;
 }

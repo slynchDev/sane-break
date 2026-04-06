@@ -104,18 +104,9 @@ void AppStateNormal::onIdleStart(AppContext* app) {
   app->data->addPauseReasons(PauseReason::Idle);
   app->transitionTo(std::make_unique<AppStatePaused>());
 }
-void AppStateNormal::onPauseRequest(AppContext* app, PauseReasons reasons) {
+void AppStateNormal::onPauseRequest(AppContext* app, PauseReasons) {
   // When in postpone mode, disable pausing
   if (app->data->isPostponing()) return;
-  // If auto-meeting is enabled and pause is due to a monitored app, enter meeting mode
-  if (reasons.testFlag(PauseReason::AppOpen) &&
-      app->preferences->autoMeetingOnApp->get()) {
-    app->data->removePauseReasons(PauseReason::AppOpen);
-    app->data->resetPostpone();
-    app->data->setIndefiniteMeetingData(QObject::tr("App detected"));
-    app->transitionTo(std::make_unique<AppStateMeeting>());
-    return;
-  }
   app->transitionTo(std::make_unique<AppStatePaused>());
 }
 void AppStateNormal::onMenuAction(AppContext* app, MenuAction action) {

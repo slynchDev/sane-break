@@ -21,4 +21,6 @@ class AbstractSystemMonitor : public QObject {
   void pauseRequested(PauseReason reason);
   void resumeRequested(PauseReason reason);
   void programStopped();
+  void meetingAppStarted();
+  void meetingAppStopped();
 };

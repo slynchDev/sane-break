@@ -22,14 +22,18 @@ class RunningProgramsMonitor : public QObject {
  signals:
   void programStarted();
   void programStopped();
+  void meetingStarted();
+  void meetingStopped();
 
  private slots:
   void tick();
 
  private:
   const QStringList runningPrograms();
+  const QStringList activeAudioPrograms();
   const QRegularExpression validProgramFilter = QRegularExpression(".");
   QTimer* monitorTimer;
   QStringList programsToMonitor;
   bool previouslySeen = false;
+  bool previouslyInMeeting = false;
 };

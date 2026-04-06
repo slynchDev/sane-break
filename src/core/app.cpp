@@ -65,7 +65,12 @@ AbstractApp::AbstractApp(const AppDependencies& deps, QObject* parent)
   connect(breakWindows, &AbstractBreakWindows::startBreakRequested, this,
           &AbstractApp::breakNow);
 
-  connect(m_systemMonitor, &AbstractSystemMonitor::programStopped, this, [this]() {
+  connect(m_systemMonitor, &AbstractSystemMonitor::meetingAppStarted, this, [this]() {
+    if (preferences->autoMeetingOnApp->get()) {
+      startIndefiniteMeeting(QObject::tr("App detected"));
+    }
+  });
+  connect(m_systemMonitor, &AbstractSystemMonitor::meetingAppStopped, this, [this]() {
     if (data->isInMeeting() && data->isMeetingIndefinite()) {
       endMeetingBreakNow();
     }

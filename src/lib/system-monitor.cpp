@@ -38,6 +38,10 @@ SystemMonitor::SystemMonitor(SanePreferences* preferences, QObject* parent)
             emit resumeRequested(PauseReason::AppOpen);
             emit programStopped();
           });
+  connect(runningProgramsMonitor, &RunningProgramsMonitor::meetingStarted, this,
+          &SystemMonitor::meetingAppStarted);
+  connect(runningProgramsMonitor, &RunningProgramsMonitor::meetingStopped, this,
+          &SystemMonitor::meetingAppStopped);
 
   connect(preferences->programsToMonitor, &SettingWithSignal::changed, this, [this]() {
     runningProgramsMonitor->setPrograms(this->preferences->programsToMonitor->get());
