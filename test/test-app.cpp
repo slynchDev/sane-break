@@ -749,6 +749,145 @@ class TestApp : public QObject {
     app.advance(50);
     QCOMPARE(app.trayData.meetingSecondsRemaining, 50);
   }
+  // Indefinite meeting enters Meeting state with elapsed=0 and no countdown
+  void indefinite_meeting_start_state() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    app.startIndefiniteMeeting("auto-detected");
+
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QVERIFY(app.trayData.isInMeeting);
+    QVERIFY(app.trayData.isMeetingIndefinite);
+    QCOMPARE(app.trayData.meetingSecondsRemaining, 0);
+    QCOMPARE(app.trayData.meetingTotalSeconds, 0);
+    QCOMPARE(app.trayData.meetingReason, QString("auto-detected"));
+  }
+  // Indefinite meeting tick counts up elapsed and never auto-ends
+  void indefinite_meeting_tick_elapsed() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    app.startIndefiniteMeeting("auto-detected");
+    app.advance(120);
+
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QCOMPARE(app.trayData.meetingTotalSeconds, 120);
+    QCOMPARE(app.trayData.meetingSecondsRemaining, 0);
+
+    app.advance(3600);
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QCOMPARE(app.trayData.meetingTotalSeconds, 3720);
+  }
+  // Ending indefinite meeting with BreakNow does not upgrade to big break
+  void indefinite_meeting_end_break_now_no_big_break() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    int beforeSmallBreaks = app.trayData.smallBreaksBeforeBigBreak;
+
+    app.startIndefiniteMeeting("auto-detected");
+    app.endMeetingBreakNow();
+
+    QVERIFY(app.trayData.isBreaking);
+    QVERIFY(!app.trayData.isInMeeting);
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak, beforeSmallBreaks);
+  }
+  // Ending indefinite meeting with BreakLater does not upgrade to big break
+  void indefinite_meeting_end_break_later_no_big_break() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    int beforeSmallBreaks = app.trayData.smallBreaksBeforeBigBreak;
+
+    app.startIndefiniteMeeting("auto-detected");
+    app.endMeetingBreakLater(300);
+
+    QVERIFY(!app.trayData.isInMeeting);
+    QVERIFY(!app.trayData.isBreaking);
+    QCOMPARE(app.trayData.secondsToNextBreak, 300);
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak, beforeSmallBreaks);
+  }
+  // Sleep during indefinite meeting stays in meeting; span reopened
+  void indefinite_meeting_survives_sleep() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    app.startIndefiniteMeeting("auto-detected");
+    app.advance(60);
+
+    emit deps.systemMonitor->sleepEnded(1800);
+
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QVERIFY(app.trayData.isInMeeting);
+    QVERIFY(app.trayData.isMeetingIndefinite);
+  }
+  // Starting indefinite meeting during focus mode ends focus
+  void indefinite_meeting_ends_focus() {
+    deps.preferences->focusSmallEvery->set(600);
+    deps.preferences->focusSmallFor->set(10);
+    deps.preferences->focusBigBreakEnabled->set(false);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    app.startFocus(3, "deep work");
+    app.advanceToBreakEnd();
+    QVERIFY(app.trayData.isFocusMode);
+
+    app.startIndefiniteMeeting("auto-detected");
+
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QVERIFY(!app.trayData.isFocusMode);
+    QVERIFY(app.trayData.isMeetingIndefinite);
+  }
+  // meetingAppStarted signal enters indefinite meeting when autoMeetingOnApp is true
+  void auto_meeting_started_via_signal() {
+    deps.preferences->autoMeetingOnApp->set(true);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    emit deps.systemMonitor->meetingAppStarted();
+
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QVERIFY(app.trayData.isInMeeting);
+    QVERIFY(app.trayData.isMeetingIndefinite);
+  }
+  // meetingAppStarted signal is ignored when autoMeetingOnApp is false
+  void auto_meeting_ignored_when_disabled() {
+    deps.preferences->autoMeetingOnApp->set(false);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    emit deps.systemMonitor->meetingAppStarted();
+
+    QCOMPARE(app.currentState(), AppState::Normal);
+    QVERIFY(!app.trayData.isInMeeting);
+  }
+  // meetingAppStopped signal ends an active indefinite meeting
+  void auto_meeting_stopped_ends_meeting() {
+    deps.preferences->autoMeetingOnApp->set(true);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    emit deps.systemMonitor->meetingAppStarted();
+    QVERIFY(app.trayData.isMeetingIndefinite);
+
+    emit deps.systemMonitor->meetingAppStopped();
+
+    QCOMPARE(app.currentState(), AppState::Normal);
+    QVERIFY(!app.trayData.isInMeeting);
+    QCOMPARE(app.trayData.secondsToNextBreak, deps.preferences->smallEvery->get());
+  }
+  // meetingAppStopped signal does NOT end a manual finite meeting
+  void auto_meeting_stopped_ignored_during_finite() {
+    deps.preferences->autoMeetingOnApp->set(true);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    app.startMeeting(1800, "manual standup");
+    QVERIFY(!app.trayData.isMeetingIndefinite);
+
+    emit deps.systemMonitor->meetingAppStopped();
+
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QVERIFY(app.trayData.isInMeeting);
+  }
   // Sleep end should not change the pause state
   void sleep_end_while_idle_paused() {
     NiceMock<DummyApp> app(deps);

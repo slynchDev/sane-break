@@ -64,7 +64,7 @@ const QStringList RunningProgramsMonitor::runningPrograms() {
   return programs;
 }
 
-const QStringList RunningProgramsMonitor::activeAudioPrograms() {
+void RunningProgramsMonitor::startAudioProgramsQuery() {
   // TODO: Implement Windows audio stream detection via WASAPI
-  return {};
+  m_lastAudioPrograms.clear();
 }

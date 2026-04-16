@@ -83,4 +83,7 @@ class AbstractApp : public AppContext {
   void updateTray();
 
   virtual void doLockScreen() = 0;
+
+ private:
+  void startMeetingInternal(int seconds, const QString& reason, bool indefinite);
 };

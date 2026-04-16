@@ -5,6 +5,7 @@
 #pragma once
 
 #include <QObject>
+#include <QProcess>
 #include <QRegularExpression>
 #include <QStringList>
 #include <QTimer>
@@ -18,6 +19,8 @@ class RunningProgramsMonitor : public QObject {
   void startMonitoring();
   void stopMonitoring();
   void setPrograms(const QStringList& programs);
+  void setMeetingDetectionEnabled(bool enabled);
+  bool isAnyProgramRunning() const { return previouslySeen; }
 
  signals:
   void programStarted();
@@ -30,10 +33,16 @@ class RunningProgramsMonitor : public QObject {
 
  private:
   const QStringList runningPrograms();
-  const QStringList activeAudioPrograms();
+  // Platform-specific: starts a non-blocking audio-stream query. Results land
+  // in m_lastAudioPrograms via QProcess::finished. macOS/Windows stubs no-op.
+  void startAudioProgramsQuery();
   const QRegularExpression validProgramFilter = QRegularExpression(".");
   QTimer* monitorTimer;
   QStringList programsToMonitor;
   bool previouslySeen = false;
   bool previouslyInMeeting = false;
+  bool meetingDetectionEnabled = false;
+  QProcess* m_audioProcess = nullptr;
+  QTimer* m_audioWatchdog = nullptr;
+  QStringList m_lastAudioPrograms;
 };

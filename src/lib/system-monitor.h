@@ -30,4 +30,5 @@ class SystemMonitor : public AbstractSystemMonitor {
   BatteryStatus* batteryWatcher;
   RunningProgramsMonitor* runningProgramsMonitor;
   ScreenMonitor* screenMonitor;
+  bool m_appOpenPausePending = false;
 };

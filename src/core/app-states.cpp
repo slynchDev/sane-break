@@ -363,10 +363,20 @@ void BreakPhasePost::onIdleEnd(AppContext* app, AppStateBreak*) {
   app->transitionTo(std::make_unique<AppStateNormal>());
 }
 
+// Opens a meeting span with a consistent JSON shape across enter and
+// sleep-reopen paths. For indefinite meetings, scheduledSeconds is 0 (since
+// meetingTotalSeconds tracks elapsed time, not a schedule).
+static void openMeetingSpan(AppContext* app) {
+  bool indefinite = app->data->isMeetingIndefinite();
+  app->openCurrentSpan(
+      "meeting",
+      {{"indefinite", indefinite},
+       {"scheduledSeconds", indefinite ? 0 : app->data->meetingTotalSeconds()},
+       {"reason", app->data->meetingReason()}});
+}
+
 void AppStateMeeting::enter(AppContext* app) {
-  app->openCurrentSpan("meeting",
-                       {{"scheduledSeconds", app->data->meetingTotalSeconds()},
-                        {"reason", app->data->meetingReason()}});
+  openMeetingSpan(app);
   app->data->resetSecondsToNextBreak();
   app->idleTimer->setWatchAccuracy(5000);
   app->idleTimer->setMinIdleTime(app->preferences->pauseOnIdleFor->get() * 1000);
@@ -418,9 +428,7 @@ void AppStateMeeting::onMenuAction(AppContext* app, MenuAction action) {
 bool AppStateMeeting::onSleepEnd(AppContext* app, int sleptSeconds) {
   // Indefinite meetings survive sleep — just reopen the span
   if (app->data->isMeetingIndefinite()) {
-    app->openCurrentSpan("meeting",
-                         {{"indefinite", true},
-                          {"reason", app->data->meetingReason()}});
+    openMeetingSpan(app);
     return true;
   }
   int breakDuration = app->data->effectiveBigBreakEnabled()
@@ -435,9 +443,7 @@ bool AppStateMeeting::onSleepEnd(AppContext* app, int sleptSeconds) {
     return true;
   }
   // Short sleep: reopen meeting span at current time
-  app->openCurrentSpan("meeting",
-                       {{"scheduledSeconds", app->data->meetingTotalSeconds()},
-                        {"reason", app->data->meetingReason()}});
+  openMeetingSpan(app);
   app->data->subtractMeetingRemaining(sleptSeconds);
   return true;
 }

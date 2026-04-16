@@ -67,12 +67,13 @@ AbstractApp::AbstractApp(const AppDependencies& deps, QObject* parent)
 
   connect(m_systemMonitor, &AbstractSystemMonitor::meetingAppStarted, this, [this]() {
     if (preferences->autoMeetingOnApp->get()) {
-      startIndefiniteMeeting(QObject::tr("App detected"));
+      startIndefiniteMeeting(tr("App detected"));
     }
   });
   connect(m_systemMonitor, &AbstractSystemMonitor::meetingAppStopped, this, [this]() {
-    if (data->isInMeeting() && data->isMeetingIndefinite()) {
-      endMeetingBreakNow();
+    if (m_currentState->getID() == AppState::Meeting &&
+        data->isMeetingIndefinite()) {
+      endMeetingBreakLater(preferences->smallEvery->get());
     }
   });
 
@@ -151,24 +152,26 @@ void AbstractApp::startFocus(int totalCycles, const QString& reason) {
 void AbstractApp::endFocus() { onMenuAction(Action::EndFocus{}); }
 
 void AbstractApp::startMeeting(int seconds, const QString& reason) {
-  if (m_currentState->getID() == AppState::Meeting) return;
-  data->resetPostpone();
-  if (data->isFocusMode()) {
-    db->closeSpan(data->focusSpanId(), {{"reason", "meeting"}});
-    data->endFocusMode();
-  }
-  data->setMeetingData(seconds, seconds, reason);
-  transitionTo(std::make_unique<AppStateMeeting>());
+  startMeetingInternal(seconds, reason, false);
 }
 
 void AbstractApp::startIndefiniteMeeting(const QString& reason) {
+  startMeetingInternal(0, reason, true);
+}
+
+void AbstractApp::startMeetingInternal(int seconds, const QString& reason,
+                                       bool indefinite) {
   if (m_currentState->getID() == AppState::Meeting) return;
   data->resetPostpone();
   if (data->isFocusMode()) {
     db->closeSpan(data->focusSpanId(), {{"reason", "meeting"}});
     data->endFocusMode();
   }
-  data->setIndefiniteMeetingData(reason);
+  if (indefinite) {
+    data->setIndefiniteMeetingData(reason);
+  } else {
+    data->setMeetingData(seconds, seconds, reason);
+  }
   transitionTo(std::make_unique<AppStateMeeting>());
 }
 
