@@ -80,6 +80,13 @@ void RemoteActivityMonitor::stop() {
 }
 
 void RemoteActivityMonitor::openSockets() {
+  // Always start from a clean state — start()/stop() cycles, partial-bind
+  // failures, and runtime rebinds (port/interface preference changes) can
+  // all call openSockets() more than once. Without this reset, stale
+  // m_allowedInterfaceIndexes entries would widen the ingress filter
+  // beyond the current user allowlist.
+  closeSockets();
+
   const QStringList names = m_prefs->peerBroadcastInterfaces->get();
   if (names.isEmpty()) return;
 
