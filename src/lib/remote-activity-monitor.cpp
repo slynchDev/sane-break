@@ -84,6 +84,15 @@ void RemoteActivityMonitor::openSockets() {
   if (names.isEmpty()) return;
 
   const int port = m_prefs->peerListenPort->get();
+  // Validate port before the narrowing cast to quint16 — user can hand-edit
+  // the INI to any int; silent wrap would bind an unintended UDP port.
+  if (port < 1024 || port > 65535) {
+    qWarning("Peer fusion: peerListenPort=%d out of range [1024, 65535]; "
+             "fusion disabled for this session",
+             port);
+    return;
+  }
+
   for (const QString& name : names) {
     QNetworkInterface iface = QNetworkInterface::interfaceFromName(name);
     if (!iface.isValid() || !(iface.flags() & QNetworkInterface::IsUp) ||
@@ -107,6 +116,15 @@ void RemoteActivityMonitor::openSockets() {
                qPrintable(name));
       continue;
     }
+
+    // Record the user's ingress allowlist intent BEFORE attempting bind.
+    // Every socket binds AnyIPv4:port with ShareAddress, so a sibling socket
+    // on another NIC will still deliver datagrams arriving on this interface
+    // (Qt reports the arrival index via QNetworkDatagram::interfaceIndex()).
+    // Only skipping the insert on bind failure would silently drop legitimate
+    // packets from user-allowlisted NICs.
+    m_allowedInterfaceIndexes.insert(iface.index());
+
     auto* socket = new QUdpSocket(this);
     if (!socket->bind(QHostAddress::AnyIPv4, static_cast<quint16>(port),
                       QUdpSocket::ShareAddress |
@@ -121,7 +139,6 @@ void RemoteActivityMonitor::openSockets() {
     InterfaceSocket tup{socket, addrEntry.ip(), addrEntry.broadcast(),
                         iface.index()};
     m_sockets.append(tup);
-    m_allowedInterfaceIndexes.insert(iface.index());
   }
   if (m_sockets.isEmpty()) {
     qWarning("Peer fusion: no interfaces from the allowlist could be bound; "
