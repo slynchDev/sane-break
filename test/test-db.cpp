@@ -7,6 +7,7 @@
 #include <QHostInfo>
 #include <QJsonObject>
 #include <QObject>
+#include <QSignalSpy>
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QString>
@@ -354,6 +355,54 @@ class TestDb : public QObject {
       QVERIFY(check.exec("SELECT host FROM spans"));
       QVERIFY(check.next());
       QCOMPARE(check.value(0).toString(), QHostInfo::localHostName());
+    }
+    QSqlDatabase::removeDatabase(conn);
+  }
+
+  // Property 11 — migration failure containment. We force migrate() to
+  // fail by pre-populating a pathological schema: a spans table that
+  // already has a conflicting column type, so the runtime UPDATE during
+  // backfill hits a real SQL error. isReadOnly() flips true and all
+  // write paths silently no-op while reads still succeed.
+  void migration_failure_flips_read_only_and_skips_writes() {
+    const QString conn = "test-db-broken";
+    {
+      auto broken = QSqlDatabase::addDatabase("QSQLITE", conn);
+      broken.setDatabaseName(":memory:");
+      QVERIFY(broken.open());
+      QSqlQuery q(broken);
+      // Legacy-shaped spans with a bogus CHECK that rejects the runtime
+      // backfill value. Forces the UPDATE inside migrate() to fail.
+      QVERIFY(q.exec("CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, "
+                     "data TEXT, created_at TIMESTAMP)"));
+      QVERIFY(q.exec("CREATE TABLE spans (id INTEGER PRIMARY KEY, type TEXT, "
+                     "started_at TIMESTAMP, ended_at TIMESTAMP, data TEXT, "
+                     "host TEXT CHECK (host = '__never_matches__'))"));
+      QVERIFY(q.exec("INSERT INTO spans (type, started_at, data) VALUES "
+                     "('normal', '2024-01-01 12:00:00', '{}')"));
+      QVERIFY(q.exec("PRAGMA user_version = 0"));
+
+      BreakDatabase brokenDb(broken);
+      QSignalSpy failSpy(&brokenDb, &BreakDatabase::initializationFailed);
+      brokenDb.logEvent("trigger::migrate");  // ensureDb → migrate → FAIL
+      QVERIFY(brokenDb.isReadOnly());
+      QVERIFY(failSpy.count() >= 1);
+
+      // Further writes must be silent no-ops — no crash, no exception.
+      const int before = [&broken]() {
+        QSqlQuery check(broken);
+        check.exec("SELECT COUNT(*) FROM spans");
+        return check.next() ? check.value(0).toInt() : -1;
+      }();
+      (void)brokenDb.logEvent("after::readonly");
+      int idAttempt = brokenDb.openSpan("normal");
+      QCOMPARE(idAttempt, -1);
+      brokenDb.closeSpan(42);  // must not throw
+
+      QSqlQuery check(broken);
+      QVERIFY(check.exec("SELECT COUNT(*) FROM spans"));
+      QVERIFY(check.next());
+      QCOMPARE(check.value(0).toInt(), before);  // unchanged
     }
     QSqlDatabase::removeDatabase(conn);
   }

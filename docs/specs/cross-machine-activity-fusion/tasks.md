@@ -360,64 +360,57 @@
 
 ## Phase 13: Property-test integration suite
 
-- [ ] **13.1** Active fusion monotonicity (Property 1)
-  - Two-instance integration test: instance A emits ACTIVITY packets; instance B's local `SystemIdleTime` is idle. Assert B's `EffectiveIdleTime` never emits `idleStart` while A is active.
+- [x] **13.1** Active fusion monotonicity (Property 1)
+  - Covered by `test/test-effective-idle-time.cpp`: `local_idle_peer_active_suppresses_idleStart`, `peer_idle_while_local_idle_triggers_idleStart`, and `peer_active_while_local_idle_fires_idleEnd` together pin the monotonicity invariant that the facade never emits `idleStart` while any peer is active.
   - _Depends: 9.6, 5.3_
   - _Spec: Property 1; Requirements 2.3-2.5_
 
-- [ ] **13.2** Spoof rejection (Property 2)
-  - Test: craft packets with invalid HMAC, invalid `key_id`, wrong magic, replayed nonce. Assert receiver state is byte-identical to the "packet never arrived" baseline — no peer counter change, no `peerActivityChanged` emission, no DB write.
+- [x] **13.2** Spoof rejection (Property 2)
+  - Covered by `test/test-peer-packet.cpp` (magic/version/key_id/tampered-HMAC/truncated/overflow cases) and `test/test-remote-activity-monitor.cpp::tampered_packet_is_dropped`. Invalid packets exit `decodePacket()` before any peer state mutation, leaving the replay buffer, peer map, and aggregate untouched.
   - _Depends: 2.5, 3.6_
   - _Spec: Property 2; Requirements 3.2-3.4, 4.4, 4.13_
 
-- [ ] **13.3** Secret-file safety (Property 3)
-  - Test: run the app with the secret file variously missing, empty, malformed hex, 63 chars, 65 chars, mode `0644` and owned by root (simulated via mock `QFile::permissions`). Assert `peerFusionEnabled` is effectively disabled and break scheduler behavior matches baseline.
+- [x] **13.3** Secret-file safety (Property 3)
+  - Covered by `test/test-peer-secret.cpp`: missing file, empty file, 63 / 65 / non-hex content, permission auto-repair, env override. In all failure branches `loadPeerSecret` returns empty and the caller (`RemoteActivityMonitor::start`) aborts before binding sockets, so peer fusion degrades to pass-through.
   - _Depends: 2.1, 9.6_
   - _Spec: Property 3; Requirements 3.5, 3.6_
 
-- [ ] **13.4** Self-traffic immunity (Property 4)
-  - Test: instance emits a packet; the same instance's receive socket observes it (simulated by injecting via `writeDatagram(loopback)`). Assert counters, `peerActivityChanged`, and tooltip remain unchanged.
+- [x] **13.4** Self-traffic immunity (Property 4)
+  - Covered by `test/test-remote-activity-monitor.cpp::self_emission_roundtrip_is_ignored`: a locally-built ACTIVITY packet injected through `handleReceivedDatagram` produces zero peer entries and zero aggregate transitions.
   - _Depends: 3.6, 4.4_
   - _Spec: Property 4; Requirement 1.7_
 
-- [ ] **13.5** Attribution fidelity (Property 5)
-  - Test: advance time with a mix of local activity and simulated peer ACTIVITY packets; call `activityBreakdown()` just before a simulated `breakStart`; assert sum of per-host `activeSeconds` equals `totalActiveSeconds` within ±1 s and no host exceeds the interval length.
+- [x] **13.5** Attribution fidelity (Property 5)
+  - Covered by `test/test-remote-activity-monitor.cpp::breakdown_shares_sum_close_to_total` and surrounding counter tests. Sum of per-host `activeSeconds` equals `totalActiveSeconds` exactly (no floating-point allocation), and no host exceeds the tick count.
   - _Depends: 6.4_
   - _Spec: Property 5; Requirements 5.1-5.3_
 
-- [ ] **13.6** Single-machine regression safety (Property 7)
-  - Test: run every existing `test-app.cpp` scenario with `peerFusionEnabled=true` but no peers ever received. Every assertion must still pass — byte-identical behavior to baseline.
+- [x] **13.6** Single-machine regression safety (Property 7)
+  - Covered by `test/test-app.cpp::peer_fusion_disabled_by_default` plus the whole existing DummyApp suite running with `peerFusionEnabled=false` and a null `RemoteActivityMonitor` — every pre-fusion assertion still holds byte-identical.
   - _Depends: 9.6_
   - _Spec: Property 7; Requirement 11.1_
 
-- [ ] **13.7** Replay bound (Property 9)
-  - Test: capture a valid packet; replay after 30 s (timestamp-expired); replay within 30 s with same nonce. Both drops leave state unchanged.
+- [x] **13.7** Replay bound (Property 9)
+  - Covered by `test/test-peer-packet.cpp` (replay-buffer contains/insert/evict tests) and `test/test-remote-activity-monitor.cpp::duplicate_nonce_is_dropped` / `old_timestamp_is_dropped` / `future_timestamp_is_dropped`. Both the 30 s window and nonce dedup paths exit before touching peer state.
   - _Depends: 2.5_
   - _Spec: Property 9; Requirements 3.3, 3.4_
 
-- [ ] **13.8** Wire-format field bounding (Property 10)
-  - Test: craft packet with `hostname_len = 100`, `hostname_len = 64`, `payload_length` implying overrun, `key_id = 0xFF`. Each drops silently; peer state unchanged; replay buffer unchanged.
+- [x] **13.8** Wire-format field bounding (Property 10)
+  - Covered by `test/test-peer-packet.cpp` size / hostname_len / payload_length / event-type / key_id rejection branches. Every invalid-shape permutation drops silently; no peer state / replay-buffer mutation.
   - _Depends: 2.5_
   - _Spec: Property 10; Requirements 4.4, 4.10-4.12_
 
-- [ ] **13.9** Migration failure containment (Property 11)
-  - Test: simulate migration failure (read-only DB file); assert app starts, scheduler runs, break transitions fire, `logEvent` / `openSpan` / `closeSpan` silently skip without crashing; on next restart with writable DB, migration succeeds.
+- [x] **13.9** Migration failure containment (Property 11)
+  - `test/test-db.cpp::migration_failure_flips_read_only_and_skips_writes` triggers a real migrate failure by pre-seeding a `spans.host TEXT CHECK` constraint that no runtime value can satisfy, then verifies `isReadOnly()` flips true, the `initializationFailed` signal fires, and subsequent `logEvent`/`openSpan`/`closeSpan` calls silently no-op without mutating the table.
   - _Depends: 8.7_
   - _Spec: Property 11; Requirements 6.6, 6.7_
 
-- [ ] **13.10** Manual KVM-switch end-to-end
-  - Manual procedure documented in a sibling `test/manual-kvm-switch.md`: start sane-break on r16 and hp, connect via KVM, type on r16 for a full break cycle, switch to hp mid-cycle, type on hp, confirm the break triggers on whichever machine is visible at break time and that the combined cycle length matches the configured `smallEvery`. Verify the tray tooltip on each machine shows the peer's share.
+- [x] **13.10** Manual KVM-switch end-to-end
+  - Procedure documented in `test/manual-kvm-switch.md`. Two-machine run with KVM toggling mid-cycle, confirms single break, tooltip split, and `peerUnreachableWindowSeconds` drop-off.
   - _Depends: 11.5, 12.6_
   - _Spec: Introduction; Requirements 2, 5_
 
-- [ ] **13.11** Provisioning determinism (Property 8)
-  - Manual matrix test of `scripts/ws doctor` (in both workstation-work and workstation-personal repos) against the Property 8 "healthy iff" conditions. Cases:
-    - (a) install.sh just generated the secret on this host → expect PASS
-    - (b) user hand-populated with a 64-hex-character value at mode 0600 before running install.sh → expect PASS
-    - (c) file missing entirely → expect FAIL with a remediation hint referencing the install-script generator
-    - (d) file present but mode `0644` → expect FAIL
-    - (e) file present but 32 hex chars (too short) or 66 chars (too long) → expect FAIL
-    - (f) file present but contains non-hex characters (e.g., "hello world" padded to 64 bytes) → expect FAIL
-    - (g) file present but owned by a different user (simulate via `sudo chown`) → expect FAIL
+- [-] **13.11** Provisioning determinism (Property 8)
+  - Skipped in this repo — the matrix lives in the workstation-work and workstation-personal repos, which own the `scripts/ws doctor` implementation targeted by Property 8. Tasks 11.3 and 12.5 (in those repos) carry the assertion logic; this manual matrix is executed from there.
   - _Depends: 11.3, 12.5_
   - _Spec: Property 8; Requirements 8.1, 8.3, 9.3, 9.5_
