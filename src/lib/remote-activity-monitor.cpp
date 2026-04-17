@@ -84,7 +84,7 @@ void RemoteActivityMonitor::start() {
 
 void RemoteActivityMonitor::stop() {
   if (!m_running && m_sockets.isEmpty() && m_peers.isEmpty() &&
-      !m_anyPeerActive) {
+      !m_anyPeerActive && !m_anyPeerInMeeting) {
     return;
   }
   m_running = false;
@@ -96,6 +96,10 @@ void RemoteActivityMonitor::stop() {
   if (m_anyPeerActive) {
     m_anyPeerActive = false;
     emit peerActivityChanged(false);
+  }
+  if (m_anyPeerInMeeting) {
+    m_anyPeerInMeeting = false;
+    emit peerMeetingChanged(false);
   }
 }
 
@@ -239,6 +243,15 @@ void RemoteActivityMonitor::handleReceivedDatagram(const QByteArray& bytes,
       ps.lastSeenIdle = now;
       ps.lastState = PeerLastState::Idle;
     }
+  } else if (packet.eventType == EVENT_MEETING_TRANSITION) {
+    // Phase 14. Meeting state is orthogonal to idle: a peer can be in a
+    // meeting while actively typing OR while quietly listening. We update
+    // `inMeeting` only; `lastSeenActive`/`lastState` are driven solely
+    // by ACTIVITY / IDLE_TRANSITION events, preserving the existing
+    // fused-idle semantics.
+    const uint8_t state = static_cast<uint8_t>(packet.payload[0]);
+    ps.inMeeting = (state == MEETING_STARTED);
+    ps.lastSeenMeetingTransition = now;
   }
 
   recomputeAnyPeerActive(now);
@@ -274,6 +287,22 @@ void RemoteActivityMonitor::onLocalIdleEnd() {
   sendToAllInterfaces(bytes, now);
 }
 
+void RemoteActivityMonitor::broadcastMeetingStart() {
+  if (!m_running) return;
+  const QDateTime now = QDateTime::currentDateTimeUtc();
+  QByteArray bytes = buildMeetingTransitionPacket(now, MEETING_STARTED);
+  if (bytes.isEmpty()) return;
+  sendToAllInterfaces(bytes, now);
+}
+
+void RemoteActivityMonitor::broadcastMeetingEnd() {
+  if (!m_running) return;
+  const QDateTime now = QDateTime::currentDateTimeUtc();
+  QByteArray bytes = buildMeetingTransitionPacket(now, MEETING_ENDED);
+  if (bytes.isEmpty()) return;
+  sendToAllInterfaces(bytes, now);
+}
+
 QByteArray RemoteActivityMonitor::buildActivityPacket(const QDateTime& now,
                                                       quint32 eventCount) const {
   if (m_secret.isEmpty()) return {};
@@ -300,6 +329,19 @@ QByteArray RemoteActivityMonitor::buildIdleTransitionPacket(
   p.timestamp = now.toSecsSinceEpoch();
   p.nonce = QRandomGenerator::global()->generate64();
   p.eventType = EVENT_IDLE_TRANSITION;
+  p.payload.append(static_cast<char>(state));
+  return encodePacket(p, m_secret);
+}
+
+QByteArray RemoteActivityMonitor::buildMeetingTransitionPacket(
+    const QDateTime& now, uint8_t state) const {
+  if (m_secret.isEmpty()) return {};
+  Packet p;
+  p.senderUuid = m_senderUuid;
+  p.hostname = QHostInfo::localHostName();
+  p.timestamp = now.toSecsSinceEpoch();
+  p.nonce = QRandomGenerator::global()->generate64();
+  p.eventType = EVENT_MEETING_TRANSITION;
   p.payload.append(static_cast<char>(state));
   return encodePacket(p, m_secret);
 }
@@ -331,7 +373,14 @@ void RemoteActivityMonitor::tick(const QDateTime& now) {
   const int activeWindow = m_prefs->peerActiveWindowSeconds->get();
   for (auto it = m_peers.begin(); it != m_peers.end();) {
     PeerState& ps = it.value();
-    const QDateTime lastSeen = std::max(ps.lastSeenActive, ps.lastSeenIdle);
+    // Phase 14: a MEETING_TRANSITION packet also counts as recency evidence,
+    // in case a passive-listening peer sends no ACTIVITY or IDLE edges for
+    // a stretch of the call.
+    QDateTime lastSeen = std::max(ps.lastSeenActive, ps.lastSeenIdle);
+    if (ps.lastSeenMeetingTransition.isValid() &&
+        ps.lastSeenMeetingTransition > lastSeen) {
+      lastSeen = ps.lastSeenMeetingTransition;
+    }
     if (!lastSeen.isValid() || lastSeen.secsTo(now) > unreachableWindow) {
       it = m_peers.erase(it);
       continue;
@@ -409,11 +458,30 @@ bool RemoteActivityMonitor::computeAnyPeerActive(const QDateTime& now) const {
   return false;
 }
 
+// Phase 14. A peer counts toward `anyPeerInMeeting` iff it is currently
+// flagged `inMeeting` AND has not been evicted by the unreachable-window
+// sweep (which removes the PeerState entry entirely). There is no
+// secondary "meeting expiry" window — a peer that goes silent inside a
+// meeting will drop out when it crosses peerUnreachableWindowSeconds
+// and the aggregate clears naturally. This pairs with tick()'s
+// eraseIf-on-unreachable sweep.
+bool RemoteActivityMonitor::computeAnyPeerInMeeting() const {
+  for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) {
+    if (it.value().inMeeting) return true;
+  }
+  return false;
+}
+
 void RemoteActivityMonitor::recomputeAnyPeerActive(const QDateTime& now) {
-  const bool latest = computeAnyPeerActive(now);
-  if (latest != m_anyPeerActive) {
-    m_anyPeerActive = latest;
-    emit peerActivityChanged(latest);
+  const bool activeLatest = computeAnyPeerActive(now);
+  if (activeLatest != m_anyPeerActive) {
+    m_anyPeerActive = activeLatest;
+    emit peerActivityChanged(activeLatest);
+  }
+  const bool meetingLatest = computeAnyPeerInMeeting();
+  if (meetingLatest != m_anyPeerInMeeting) {
+    m_anyPeerInMeeting = meetingLatest;
+    emit peerMeetingChanged(meetingLatest);
   }
 }
 

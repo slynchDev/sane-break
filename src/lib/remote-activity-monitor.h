@@ -35,6 +35,12 @@ struct PeerState {
   QDateTime lastSeenIdle;
   PeerLastState lastState = PeerLastState::Idle;
   int activeSecondsSinceLastBreak = 0;
+  // Phase 14 — cross-peer meeting awareness.
+  // `inMeeting` is the peer's most recent declared meeting state. Peer
+  // eviction after peerUnreachableWindowSeconds removes the PeerState
+  // entry entirely, implicitly clearing its contribution to the aggregate.
+  bool inMeeting = false;
+  QDateTime lastSeenMeetingTransition;
 };
 
 struct PeerStatus {
@@ -102,8 +108,14 @@ class RemoteActivityMonitor : public QObject {
   // peer::STATE_ACTIVE} and a fresh nonce.
   QByteArray buildIdleTransitionPacket(const QDateTime& now, uint8_t state) const;
 
+  // Build a MEETING_TRANSITION packet with `state` ∈ {peer::MEETING_ENDED,
+  // peer::MEETING_STARTED} and a fresh nonce. Phase 14.
+  QByteArray buildMeetingTransitionPacket(const QDateTime& now,
+                                          uint8_t state) const;
+
   QByteArray senderUuid() const { return m_senderUuid; }
   bool anyPeerActive() const { return m_anyPeerActive; }
+  bool anyPeerInMeeting() const { return m_anyPeerInMeeting; }
   int peerCount() const { return m_peers.size(); }
   // True iff start() successfully loaded a secret AND bound at least one
   // socket. Used by the host app's rebind-failure-revert path (Req 7.8).
@@ -127,6 +139,9 @@ class RemoteActivityMonitor : public QObject {
 
  signals:
   void peerActivityChanged(bool anyPeerActive);
+  // Phase 14 — emitted whenever the aggregate across all non-offline peers
+  // transitions between "at least one in meeting" and "none in meeting".
+  void peerMeetingChanged(bool anyPeerInMeeting);
 
  public slots:
   // Wire targets — public so tests can trigger them deterministically
@@ -134,6 +149,9 @@ class RemoteActivityMonitor : public QObject {
   void onHeartbeatTick();
   void onLocalIdleStart();
   void onLocalIdleEnd();
+  // Phase 14 — wire targets for AppContext::meetingStart/meetingEnd.
+  void broadcastMeetingStart();
+  void broadcastMeetingEnd();
 
  private slots:
   void onDatagramReady();
@@ -143,6 +161,8 @@ class RemoteActivityMonitor : public QObject {
   void openSockets();
   void closeSockets();
   bool computeAnyPeerActive(const QDateTime& now) const;
+  // Phase 14 — aggregate of PeerState::inMeeting across non-offline peers.
+  bool computeAnyPeerInMeeting() const;
   void recomputeAnyPeerActive(const QDateTime& now);
   // Write the given bytes to every bound socket's subnet-directed broadcast.
   // Logs at debug level (at most once per interface per 60s) on transmit
@@ -163,6 +183,7 @@ class RemoteActivityMonitor : public QObject {
   PeerReplayBuffer m_replay;
   QHash<QByteArray, PeerState> m_peers;
   bool m_anyPeerActive = false;
+  bool m_anyPeerInMeeting = false;  // Phase 14 — aggregate cache.
   bool m_running = false;
   QList<InterfaceSocket> m_sockets;
   QSet<int> m_allowedInterfaceIndexes;

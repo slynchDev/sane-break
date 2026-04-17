@@ -154,7 +154,8 @@ std::optional<Packet> decodePacket(const QByteArray& bytes, const QByteArray& se
   quint16 payloadLength = qFromBigEndian<quint16>(bytes.constData() + pos);
   pos += 2;
 
-  if (eventType != EVENT_ACTIVITY && eventType != EVENT_IDLE_TRANSITION) {
+  if (eventType != EVENT_ACTIVITY && eventType != EVENT_IDLE_TRANSITION &&
+      eventType != EVENT_MEETING_TRANSITION) {
     return drop("unknown event_type");
   }
 
@@ -164,12 +165,15 @@ std::optional<Packet> decodePacket(const QByteArray& bytes, const QByteArray& se
     return drop("payload_length mismatch");
   }
 
-  // Event-type-specific payload shape (Requirements 4.7, 4.8).
+  // Event-type-specific payload shape (Requirements 4.7, 4.8, 12.*).
   if (eventType == EVENT_ACTIVITY && payloadLength != 4) {
     return drop("bad ACTIVITY payload size");
   }
   if (eventType == EVENT_IDLE_TRANSITION && payloadLength != 1) {
     return drop("bad IDLE_TRANSITION payload size");
+  }
+  if (eventType == EVENT_MEETING_TRANSITION && payloadLength != 1) {
+    return drop("bad MEETING_TRANSITION payload size");
   }
 
   QByteArray payload = readBytes(payloadLength);
@@ -178,6 +182,12 @@ std::optional<Packet> decodePacket(const QByteArray& bytes, const QByteArray& se
     uint8_t state = static_cast<uint8_t>(payload[0]);
     if (state != STATE_IDLE && state != STATE_ACTIVE) {
       return drop("bad IDLE_TRANSITION state byte");
+    }
+  }
+  if (eventType == EVENT_MEETING_TRANSITION) {
+    uint8_t state = static_cast<uint8_t>(payload[0]);
+    if (state != MEETING_ENDED && state != MEETING_STARTED) {
+      return drop("bad MEETING_TRANSITION state byte");
     }
   }
 
