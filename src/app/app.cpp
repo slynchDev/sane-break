@@ -52,6 +52,7 @@ SaneBreakApp::SaneBreakApp(const AppDependencies& deps, QObject* parent)
     : AbstractApp(deps, parent), m_ram(deps.remoteActivityMonitor) {
   prefWindow = new PreferenceWindow(preferences);
   tray = StatusTrayWindow::createTrayOrWindow(preferences, this);
+  tray->setRemoteActivityMonitor(m_ram);
 
   if (m_ram) {
     // Task 9.3: toggle fusion on/off without rebuilding the dependency graph.

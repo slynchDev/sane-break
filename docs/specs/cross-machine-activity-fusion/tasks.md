@@ -173,23 +173,23 @@
 
 ## Phase 7: Tray peer-breakdown tooltip
 
-- [ ] **7.1** Peer-breakdown line composer
-  - Add helper in `src/app/tray.cpp` (or a new `src/app/peer-tooltip.{h,cpp}`) that formats `activityBreakdown()` output into a human string like `r16 68% · hp 32% · 47m total`. When fewer than 2 peers are present or `peerFusionEnabled == false` or no peers seen, return empty string. When minutes < 1, format as `XXs total`.
+- [x] **7.1** Peer-breakdown line composer
+  - `formatPeerBreakdown()` lives in the anonymous namespace at the top of `src/app/tray.cpp`. It consumes `peer::ActivityBreakdown` and returns strings like `peer-hp 68% · r16 32% · 47m total`. Empty-string guards: `fusionEnabled=false`, `totalActiveSeconds<=0`, fewer than two hosts with non-zero attribution. When `totalActiveSeconds < 60` the suffix degrades to `Ns total`.
   - _Depends: 6.3_
   - _Spec: Requirements 5.3-5.5_
 
-- [ ] **7.2** 2-second throttle scoped to peer line
-  - Cache the last-rendered peer line + a `QElapsedTimer`. In `StatusTrayWindow::update()`, rebuild the peer line only if the cached value is older than 2 seconds; otherwise reuse. Countdown portion continues to refresh at the existing 1 Hz cadence unaffected.
+- [x] **7.2** 2-second throttle scoped to peer line
+  - `StatusTrayWindow` gains `m_cachedPeerLine` and `m_peerLineTimer` (QElapsedTimer). `update()` rebuilds the peer line only when `!m_peerLineTimer.isValid() || m_peerLineTimer.elapsed() >= 2000`; otherwise it reuses the cache. Countdown portion of the tooltip re-formats every call as before.
   - _Depends: 7.1_
   - _Spec: Requirement 5.4; Constraints_
 
-- [ ] **7.3** Wire RemoteActivityMonitor into tray construction
-  - `StatusTrayWindow` gains a `RemoteActivityMonitor*` (optional, nullable). `SaneBreakApp::create()` passes it. When null, the peer line is always empty; when non-null, it composes per 7.1/7.2.
+- [x] **7.3** Wire RemoteActivityMonitor into tray construction
+  - `StatusTrayWindow::setRemoteActivityMonitor(peer::RemoteActivityMonitor*)` accepts a nullable pointer. `SaneBreakApp::SaneBreakApp` calls `tray->setRemoteActivityMonitor(m_ram)` right after constructing the tray. When null (DummyApp path or fusion disabled) the cached peer line stays empty and `update()` appends nothing.
   - _Depends: 7.1, 7.2_
   - _Spec: Requirements 5.3, 5.5_
 
-- [ ] **7.4** Manual tooltip verification
-  - Manual check: run two instances on the same LAN with `peerFusionEnabled=true` and a common interface allowlisted; verify the tooltip on each shows the other peer's hostname and share percent updating at most every 2 s; tooltip countdown updates every 1 s.
+- [ ] **7.4** Manual tooltip verification (deferred)
+  - Two-machine manual check left for Phase 13.10's manual KVM test procedure. Automated coverage of the formatter lives adjacent to the formatter code.
   - _Depends: 7.3, 9.1_
   - _Spec: Requirement 5_
 
