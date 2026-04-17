@@ -264,12 +264,21 @@ namespace Ui {
 class PrefWindow;
 }
 
+namespace peer {
+class RemoteActivityMonitor;
+}
+
 class PreferenceWindow : public QMainWindow {
   Q_OBJECT
 
  public:
   PreferenceWindow(SanePreferences* preferences, QWidget* parent = nullptr);
   ~PreferenceWindow();
+
+  // Optional — when set, the Peer fusion group's live indicator lists
+  // connected peers and their last-seen status. When null, the list
+  // stays empty (matches baseline pre-fusion behavior).
+  void setRemoteActivityMonitor(peer::RemoteActivityMonitor* ram);
 
  private:
   Ui::PrefWindow* ui;
@@ -280,6 +289,7 @@ class PreferenceWindow : public QMainWindow {
   AutoStart* autoStart;
   TextWindow* openingTextWindow = nullptr;
   BreakWindows* breakWindows;
+  peer::RemoteActivityMonitor* m_ram = nullptr;
 
   bool confirmLeave();
   void setTab(int tabNum, int totalTabCount);
@@ -290,6 +300,7 @@ class PreferenceWindow : public QMainWindow {
   void browseForSound(QComboBox* comboBox);
   void browseForBackgroundImage();
   void openBreakWindowPreview();
+  void refreshPeerStatusList();
   void closeEvent(QCloseEvent* event);
   void showEvent(QShowEvent* event);
   void changeEvent(QEvent* event);

@@ -51,6 +51,7 @@
 SaneBreakApp::SaneBreakApp(const AppDependencies& deps, QObject* parent)
     : AbstractApp(deps, parent), m_ram(deps.remoteActivityMonitor) {
   prefWindow = new PreferenceWindow(preferences);
+  prefWindow->setRemoteActivityMonitor(m_ram);
   tray = StatusTrayWindow::createTrayOrWindow(preferences, this);
   tray->setRemoteActivityMonitor(m_ram);
 

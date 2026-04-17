@@ -1743,6 +1743,165 @@ All color are in &lt;code&gt;#AARRGGBB&lt;/code&gt; format.</string>
               </item>
              </layout>
             </item>
+            <item>
+             <widget class="QGroupBox" name="peerFusionGroup">
+              <property name="title">
+               <string>Peer fusion</string>
+              </property>
+              <layout class="QVBoxLayout" name="peerFusionLayout">
+               <item>
+                <widget class="QCheckBox" name="peerFusionEnabledCheck">
+                 <property name="text">
+                  <string>Enable cross-machine activity fusion</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QFormLayout" name="peerFusionFormLayout">
+                 <item row="0" column="0">
+                  <widget class="QLabel" name="peerListenPortLabel">
+                   <property name="text">
+                    <string>Listen port</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="1">
+                  <widget class="QSpinBox" name="peerListenPortBox">
+                   <property name="minimum">
+                    <number>1024</number>
+                   </property>
+                   <property name="maximum">
+                    <number>65535</number>
+                   </property>
+                   <property name="value">
+                    <number>45454</number>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="0">
+                  <widget class="QLabel" name="peerActiveWindowLabel">
+                   <property name="text">
+                    <string>Active window</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="1">
+                  <widget class="QSpinBox" name="peerActiveWindowBox">
+                   <property name="suffix">
+                    <string> s</string>
+                   </property>
+                   <property name="minimum">
+                    <number>5</number>
+                   </property>
+                   <property name="maximum">
+                    <number>120</number>
+                   </property>
+                   <property name="value">
+                    <number>15</number>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="0">
+                  <widget class="QLabel" name="peerUnreachableWindowLabel">
+                   <property name="text">
+                    <string>Unreachable window</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="1">
+                  <widget class="QSpinBox" name="peerUnreachableWindowBox">
+                   <property name="suffix">
+                    <string> s</string>
+                   </property>
+                   <property name="minimum">
+                    <number>15</number>
+                   </property>
+                   <property name="maximum">
+                    <number>600</number>
+                   </property>
+                   <property name="value">
+                    <number>60</number>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="3" column="0">
+                  <widget class="QLabel" name="peerHeartbeatIntervalLabel">
+                   <property name="text">
+                    <string>Heartbeat interval</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="3" column="1">
+                  <widget class="QSpinBox" name="peerHeartbeatIntervalBox">
+                   <property name="suffix">
+                    <string> s</string>
+                   </property>
+                   <property name="minimum">
+                    <number>1</number>
+                   </property>
+                   <property name="maximum">
+                    <number>30</number>
+                   </property>
+                   <property name="value">
+                    <number>5</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QLabel" name="peerInterfacesLabel">
+                 <property name="text">
+                  <string>Broadcast interfaces (one per line — empty means fusion is disabled):</string>
+                 </property>
+                 <property name="wordWrap">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QPlainTextEdit" name="peerBroadcastInterfacesEdit">
+                 <property name="maximumSize">
+                  <size>
+                   <width>16777215</width>
+                   <height>80</height>
+                  </size>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QLabel" name="peerSecretPathLabel">
+                 <property name="text">
+                  <string notr="true"/>
+                 </property>
+                 <property name="wordWrap">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QLabel" name="peerMetadataNoticeLabel">
+                 <property name="text">
+                  <string>Packets contain this machine's hostname and activity timing and are broadcast to the selected interfaces.</string>
+                 </property>
+                 <property name="wordWrap">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QListWidget" name="peerStatusList">
+                 <property name="maximumSize">
+                  <size>
+                   <width>16777215</width>
+                   <height>120</height>
+                  </size>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
            </layout>
           </widget>
           <widget class="QWidget" name="soundPage">

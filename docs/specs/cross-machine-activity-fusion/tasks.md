@@ -269,18 +269,18 @@
 
 ## Phase 10: Preferences UI (parallel to 3-9 after 1.2)
 
-- [ ] **10.1** Add "Peer fusion" section to `src/app/pref-window.ui`
-  - New `QGroupBox` labeled "Peer fusion". Contains (in order): `QCheckBox` for `peerFusionEnabled`, `QSpinBox` for `peerListenPort` (1024-65535), three `QSpinBox` for the three window/heartbeat settings (with ranges from Req 7.1), a `QPlainTextEdit` for the `peerBroadcastInterfaces` allowlist (one per line; empty means disabled — displayed as a visible "Peer fusion is disabled — add at least one interface below" hint), a read-only `QLabel` displaying the resolved secret file path, and a `QLabel` with the metadata-leak note ("Packets contain this machine's hostname and activity timing and are broadcast to the selected interfaces").
+- [x] **10.1** Add "Peer fusion" section to `src/app/pref-window.ui`
+  - New `QGroupBox peerFusionGroup` appended to the Pause page. Contains the six controls (`peerFusionEnabledCheck`, `peerListenPortBox`, `peerActiveWindowBox`, `peerUnreachableWindowBox`, `peerHeartbeatIntervalBox`, `peerBroadcastInterfacesEdit`), the read-only resolved-secret-path label `peerSecretPathLabel`, the metadata-leak notice `peerMetadataNoticeLabel`, and the live-indicator `peerStatusList`. SpinBox ranges match Req 7.1 (1024-65535, 5-120, 15-600, 1-30).
   - _Depends: 1.2_
   - _Spec: Requirements 7.2, 7.5_
 
-- [ ] **10.2** Wire preference controllers for Peer fusion section
-  - In `src/app/pref-window.cpp`, register controllers for each of the six settings using the existing `PrefController` pattern. The resolved secret path label reads `$SANE_BREAK_PEER_SECRET_FILE` (default `~/.secrets/sane-break-peer`).
+- [x] **10.2** Wire preference controllers for Peer fusion section
+  - `pref-window.cpp` registers `PrefController` specializations for the six controls under the existing `PrefGroup::Pause`. The secret path label text is seeded from `peer::resolvedPeerSecretPath()` (which honors `$SANE_BREAK_PEER_SECRET_FILE`). A `syncPeerGroupEnabled` lambda dims dependent controls when the master checkbox is off, mirroring how the big-break group drives its own dependents.
   - _Depends: 10.1_
   - _Spec: Requirement 7.2_
 
-- [ ] **10.3** Live peer indicator in preferences window
-  - Add a `QListWidget` under the Peer fusion settings. Populated on a 2 s `QTimer` from `RemoteActivityMonitor::peerStatuses()` (task 6.5). Each row shows `{hostLabel} — active 3 s ago` or `{hostLabel} — idle 12 s ago`, computed from `lastSeenActive` / `lastSeenIdle` relative to `QDateTime::currentDateTimeUtc()`. Hidden when `peerFusionEnabled == false`.
+- [x] **10.3** Live peer indicator in preferences window
+  - `PreferenceWindow::refreshPeerStatusList()` pulls `peerStatuses(now)` and formats each entry as `{hostLabel} — active 3s ago` / `{hostLabel} — idle 12s ago` / `{hostLabel} — … (never seen)` when a peer has been discovered but no ACTIVITY/IDLE packet has landed yet. A 2 s `QTimer` started in the ctor triggers the refresh; when `m_ram` is null (DummyApp / fusion off) the list clears and stays empty. `SaneBreakApp` injects `m_ram` into the pref window via `setRemoteActivityMonitor()`.
   - _Depends: 10.2, 6.5_
   - _Spec: Requirement 7.2_
 
