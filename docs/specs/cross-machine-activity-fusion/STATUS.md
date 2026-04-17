@@ -123,7 +123,7 @@ MTU; not fragmentable.
 ## Security model
 
 - **Secret**: 32 bytes, stored hex-encoded (64 chars) at
-  `~/.secrets/sane-break-peer` with mode 0600. Env override via
+  `~/.secrets.d/sane-break-peer` with mode 0600. Env override via
   `SANE_BREAK_PEER_SECRET_FILE`. Loader auto-repairs wider-than-0600
   permissions, rejects malformed hex, and returns empty on any failure
   (fusion then runs in single-machine pass-through mode).
@@ -255,7 +255,7 @@ machines. What's missing, split by repo:
 ### `~/git/workstation-work` (r16)
 
 - `install.sh`: race-free secret generation
-  (`(umask 177 && openssl rand -hex 32 > ~/.secrets/sane-break-peer)`)
+  (`(umask 177 && openssl rand -hex 32 > ~/.secrets.d/sane-break-peer)`)
   + chmod 0600 repair if the file exists with wider mode.
 - `scripts/doctor.sh`: four-part assertion (exists, owned by `$USER`,
   mode 0600, content is 64 hex chars).

@@ -15,7 +15,7 @@ Sane Break tracks idle time through OS-native watchers (XScreenSaver / `ext-idle
 
 This specification describes a symmetric peer-activity protocol: each instance broadcasts signed UDP packets on the LAN announcing its local activity, and each instance listens for peer packets and fuses them with its local idle signal. The fusion lives behind an `EffectiveIdleTime` facade that wraps the existing `SystemIdleTime` and consumes a new `RemoteActivityMonitor`; `AppContext` and every `AppState` subclass consume the facade through the unchanged `idleTimer` dependency and need no awareness of peers. The effective idle state becomes `localIdle AND all_peers_idle`, so typing on any host keeps all hosts' break clocks running. Attribution is preserved so a tray tooltip can show per-host contribution to the current break interval.
 
-The protocol is authenticated end-to-end with HMAC-SHA256 over a pre-shared secret to prevent an attacker on the local network from inflating remote activity counters and forcing premature or mid-task breaks. The secret is provisioned through the user's existing workstation-dotfile framework (`workstation-work` / `workstation-personal`) using the already-documented `~/.secrets` convention, with `install.sh` generating on first use and `scripts/ws doctor` asserting presence and permissions. Both workstation repos must adopt the patched fork (the personal repo currently builds upstream); spec requirements cover the needed install.sh edits in both.
+The protocol is authenticated end-to-end with HMAC-SHA256 over a pre-shared secret to prevent an attacker on the local network from inflating remote activity counters and forcing premature or mid-task breaks. The secret is provisioned through the user's existing workstation-dotfile framework (`workstation-work` / `workstation-personal`) using the already-documented `~/.secrets.d` convention, with `install.sh` generating on first use and `scripts/ws doctor` asserting presence and permissions. Both workstation repos must adopt the patched fork (the personal repo currently builds upstream); spec requirements cover the needed install.sh edits in both.
 
 The feature is strictly additive: with `peerFusionEnabled=false`, an absent or malformed secret file, world-readable secret perms that cannot be auto-repaired, or no peers ever seen, sane-break behaves identically to its pre-fusion implementation. This ensures the fork can be deployed to machines that may sometimes run standalone (laptop off-network, single-host environments) without regressing.
 
@@ -33,7 +33,7 @@ The feature is strictly additive: with `peerFusionEnabled=false`, an absent or m
 - **Clock_Skew_Tolerance**: Allowance (default 5 s) for packets with timestamps slightly in the future, covering NTP drift between peers.
 - **Nonce**: Random 8-byte field per packet; combined with `sender_uuid` forms the replay-dedup key.
 - **Sender_UUID**: Per-process random 128-bit identifier regenerated each time sane-break starts; identifies packet origin and lets receivers drop self-originated loopback traffic.
-- **Shared_Secret**: A 32-byte value (64 hex characters) stored in `~/.secrets/sane-break-peer`, identical across all of the user's hosts.
+- **Shared_Secret**: A 32-byte value (64 hex characters) stored in `~/.secrets.d/sane-break-peer`, identical across all of the user's hosts.
 - **Key_ID**: A 1-byte identifier carried on every packet that names which shared secret was used for the HMAC. v1 uses `0x00` exclusively; the field is reserved so a future version can enable staged secret rotation (overlap window where both the old and new key are accepted) without a wire-format break.
 - **Schema_Version**: Integer exposed via SQLite `PRAGMA user_version` identifying the DB layout generation; incremented by migrations.
 - **Fork**: `github.com/slynchDev/sane-break`, the user's branch `meeting-aware` (or its successor containing this feature) consumed by both workstation repos.
@@ -76,7 +76,7 @@ The feature is strictly additive: with `peerFusionEnabled=false`, an absent or m
 
 #### Acceptance Criteria
 
-1. THE RemoteActivityMonitor SHALL HMAC-SHA256-sign every outbound packet using the 32-byte shared secret loaded from the path given by `$SANE_BREAK_PEER_SECRET_FILE` (default `~/.secrets/sane-break-peer`), stamping `key_id = 0x00` on every v1 packet.
+1. THE RemoteActivityMonitor SHALL HMAC-SHA256-sign every outbound packet using the 32-byte shared secret loaded from the path given by `$SANE_BREAK_PEER_SECRET_FILE` (default `~/.secrets.d/sane-break-peer`), stamping `key_id = 0x00` on every v1 packet.
 2. THE RemoteActivityMonitor SHALL select the secret to verify an inbound packet by looking up its `key_id`; v1 receivers SHALL accept only `key_id = 0x00` and SHALL drop any packet with a different `key_id`. HMAC verification uses `QMessageAuthenticationCode::result()` followed by a constant-time byte comparison; packets failing verification SHALL be dropped silently (no log above debug level).
 3. WHEN an inbound packet's timestamp is older than `now − replayWindowSeconds` (default 30) OR newer than `now + clockSkewToleranceSeconds` (default 5), THE RemoteActivityMonitor SHALL drop the packet.
 4. THE RemoteActivityMonitor SHALL maintain a ring buffer of 256 `(sender_uuid, nonce)` pairs observed within the replay window and drop any packet whose pair is already present.
@@ -158,9 +158,9 @@ The feature is strictly additive: with `peerFusionEnabled=false`, an absent or m
 
 #### Acceptance Criteria
 
-1. WHEN `workstation-work/install.sh` runs AND `~/.secrets/sane-break-peer` is absent, THE install script SHALL (a) create `~/.secrets` with mode `0700` if absent, (b) generate 32 random bytes via `openssl rand -hex 32`, (c) write the 64-char hex string (with trailing newline) to `~/.secrets/sane-break-peer` with mode `0600`, and (d) print a message instructing the user to copy the file to every other sane-break host, with an explicit `scp ~/.secrets/sane-break-peer user@otherhost:~/.secrets/sane-break-peer && ssh user@otherhost chmod 600 ~/.secrets/sane-break-peer` example.
+1. WHEN `workstation-work/install.sh` runs AND `~/.secrets.d/sane-break-peer` is absent, THE install script SHALL (a) create `~/.secrets.d` with mode `0700` if absent, (b) generate 32 random bytes via `openssl rand -hex 32`, (c) write the 64-char hex string (with trailing newline) to `~/.secrets.d/sane-break-peer` with mode `0600`, and (d) print a message instructing the user to copy the file to every other sane-break host, with an explicit `scp ~/.secrets.d/sane-break-peer user@otherhost:~/.secrets.d/sane-break-peer && ssh user@otherhost chmod 600 ~/.secrets.d/sane-break-peer` example.
 2. WHEN `workstation-work/install.sh` runs AND the secret file exists with permissions wider than `0600`, THE install script SHALL `chmod 0600` the file and log a warning.
-3. THE `workstation-work/scripts/doctor.sh` SHALL assert, after the existing sane-break checks, that `~/.secrets/sane-break-peer` (a) exists, (b) is a regular file owned by the current user, (c) has mode `0600`, and (d) contains exactly 64 hex characters (optional trailing newline). On failure it SHALL print a remediation hint pointing to the install script's generator.
+3. THE `workstation-work/scripts/doctor.sh` SHALL assert, after the existing sane-break checks, that `~/.secrets.d/sane-break-peer` (a) exists, (b) is a regular file owned by the current user, (c) has mode `0600`, and (d) contains exactly 64 hex characters (optional trailing newline). On failure it SHALL print a remediation hint pointing to the install script's generator.
 4. THE `workstation-work/install.sh` SHALL continue to clone `https://github.com/slynchDev/sane-break.git` at the branch containing this feature (currently `meeting-aware`; may advance) into `~/git/sane-break` and build with `cmake --build`. No change required to the build flow.
 5. THE `workstation-work/configs/sane-break/SaneBreak.ini` SHALL include a `[peer]` section explicitly setting `fusion-enabled=true` plus `broadcast-interfaces` populated to the host's chosen broadcast interface (deployed into `~/.config/SaneBreak/SaneBreak.ini` by the existing `scripts/ws deploy` flow).
 
@@ -172,7 +172,7 @@ The feature is strictly additive: with `peerFusionEnabled=false`, an absent or m
 
 1. THE `workstation-personal/install.sh` SHALL replace its existing upstream clone of `https://github.com/AllanChain/sane-break.git` with a clone of `https://github.com/slynchDev/sane-break.git` at the same branch used by `workstation-work`.
 2. THE `workstation-personal/install.sh` SHALL unify its local checkout path with workstation-work (either both at `~/git/sane-break` or both at `~/src/sane-break`), and ALL dependent references in `scripts/doctor.sh` and rebuild-skip logic SHALL be updated consistently in the same change.
-3. WHEN `workstation-personal/install.sh` runs AND `~/.secrets/sane-break-peer` is absent, THE install script SHALL apply the same generation and messaging behavior as Requirement 8.1.
+3. WHEN `workstation-personal/install.sh` runs AND `~/.secrets.d/sane-break-peer` is absent, THE install script SHALL apply the same generation and messaging behavior as Requirement 8.1.
 4. WHEN `workstation-personal/install.sh` runs AND the secret file exists with permissions wider than `0600`, THE install script SHALL `chmod 0600` and log a warning.
 5. THE `workstation-personal/scripts/doctor.sh` SHALL apply the same secret assertion as Requirement 8.3.
 6. THE `workstation-personal/configs/sane-break/SaneBreak.ini` SHALL include `[peer]` with `fusion-enabled=true` plus `broadcast-interfaces` populated per the host profile.
@@ -184,7 +184,7 @@ The feature is strictly additive: with `peerFusionEnabled=false`, an absent or m
 #### Acceptance Criteria
 
 1. THE existing `cp configs/sane-break/SaneBreak.ini ~/.config/SaneBreak/` step in both install.sh scripts SHALL continue to run under `scripts/ws deploy`, carrying the new `[peer]` keys to the live config.
-2. THE `scripts/ws deploy` command SHALL NOT read, write, or alter `~/.secrets/sane-break-peer` in either repo. Secret lifecycle belongs solely to install.sh (generation) and doctor.sh (verification).
+2. THE `scripts/ws deploy` command SHALL NOT read, write, or alter `~/.secrets.d/sane-break-peer` in either repo. Secret lifecycle belongs solely to install.sh (generation) and doctor.sh (verification).
 3. THE `scripts/ws doctor` command in both repos SHALL include the secret-file assertion from Requirements 8.3 / 9.5.
 4. THE `scripts/ws deploy --pull` flow (re-apply after git pull) SHALL NOT regenerate the secret even if install.sh is invoked as a subcommand.
 
@@ -230,7 +230,7 @@ flowchart TD
     TRAY["Tray<br/>(src/app/tray)"]
     DB["BreakDatabase<br/>(src/core/db)"]
     NET["UDP broadcast :45454<br/>(selected interfaces)"]
-    SEC["Secret file<br/>~/.secrets/sane-break-peer"]
+    SEC["Secret file<br/>~/.secrets.d/sane-break-peer"]
     PREF["SanePreferences<br/>(src/core/preferences)"]
 
     OS --> ST
@@ -283,7 +283,7 @@ stateDiagram-v2
 - Must be wired through the existing `AppDependencies` struct in `src/core/app.h` (add `RemoteActivityMonitor*` field; `idleTimer` is re-pointed to an `EffectiveIdleTime` when fusion is enabled). The struct is constructed in `src/app/app.cpp` (`SaneBreakApp::create()`), not `src/app/main.cpp`.
 - Use Qt built-ins only: `QUdpSocket` (Qt Network module), `QMessageAuthenticationCode` (Qt Core), `QHostInfo`, `QUuid`. No new external dependencies; CMakeLists.txt adds `find_package(Qt6 COMPONENTS Network)` if not already present.
 - Settings live in the existing `SanePreferences` class using the `Setting<T>` template; the full INI key mapping is specified in Requirement 7.1.
-- Secret file path is a compile-time and environment convention (`$SANE_BREAK_PEER_SECRET_FILE`, default `~/.secrets/sane-break-peer`); the secret SHALL NOT be stored in `SaneBreak.ini` or any git-tracked file.
+- Secret file path is a compile-time and environment convention (`$SANE_BREAK_PEER_SECRET_FILE`, default `~/.secrets.d/sane-break-peer`); the secret SHALL NOT be stored in `SaneBreak.ini` or any git-tracked file.
 - DB migration uses SQLite `PRAGMA user_version` for schema versioning, is implemented as ALTER + UPDATE + PRAGMA inside a single transaction (not a SQL `DEFAULT` runtime expression). Reverting to a pre-fusion binary SHALL remain able to read the DB (the `host` column is simply ignored by older code).
 - Packet format is versioned (`version = 0x01`); unknown versions, unknown event types, and packets with variable-length fields exceeding their spec maxima are dropped silently by receivers.
 - Replay-dedup ring buffer is sized at 256 entries — proportional to the expected working set (2–8 hosts × 1 packet per 5 s × 30 s replay window ≈ 48 packets, with headroom for bursty idle transitions).
@@ -304,7 +304,7 @@ stateDiagram-v2
 **Validates: Requirements 3.2, 3.3, 3.4, 4.4, 4.13**
 
 ### Property 3: Secret-file safety
-*For any* state of `~/.secrets/sane-break-peer` that is missing, empty, malformed, not 64 hex characters, or has permissions wider than `0600` that cannot be auto-repaired, the app must reach steady state with `peerFusionEnabled` effectively disabled and the break scheduler's behavior identical to the pre-fusion implementation.
+*For any* state of `~/.secrets.d/sane-break-peer` that is missing, empty, malformed, not 64 hex characters, or has permissions wider than `0600` that cannot be auto-repaired, the app must reach steady state with `peerFusionEnabled` effectively disabled and the break scheduler's behavior identical to the pre-fusion implementation.
 **Validates: Requirements 3.5, 3.6, 11.3**
 
 ### Property 4: Self-traffic immunity
@@ -324,7 +324,7 @@ stateDiagram-v2
 **Validates: Requirements 11.1, 11.2**
 
 ### Property 8: Provisioning determinism
-*For any* workstation where `install.sh` has completed successfully, `scripts/ws doctor` must report the secret file as healthy iff either (a) install.sh just generated it on this host, or (b) the user populated `~/.secrets/sane-break-peer` with a 64-hex-character value at mode `0600` before running install.sh.
+*For any* workstation where `install.sh` has completed successfully, `scripts/ws doctor` must report the secret file as healthy iff either (a) install.sh just generated it on this host, or (b) the user populated `~/.secrets.d/sane-break-peer` with a 64-hex-character value at mode `0600` before running install.sh.
 **Validates: Requirements 8.1, 8.3, 9.3, 9.5**
 
 ### Property 9: Replay bound

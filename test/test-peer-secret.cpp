@@ -55,7 +55,7 @@ class TestPeerSecret : public QObject {
   void resolved_path_default() {
     qunsetenv("SANE_BREAK_PEER_SECRET_FILE");
     QCOMPARE(peer::resolvedPeerSecretPath(),
-             QDir::homePath() + "/.secrets/sane-break-peer");
+             QDir::homePath() + "/.secrets.d/sane-break-peer");
   }
 
   void valid_hex_round_trips() {

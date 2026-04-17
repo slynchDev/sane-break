@@ -12,7 +12,7 @@ namespace peer {
 // Load the 32-byte HMAC-SHA256 shared secret.
 //
 // Path resolution: `$SANE_BREAK_PEER_SECRET_FILE` env var if set,
-// otherwise `~/.secrets/sane-break-peer`.
+// otherwise `~/.secrets.d/sane-break-peer`.
 //
 // Behavior:
 // - The file may have a trailing newline; strip it before hex-decoding.

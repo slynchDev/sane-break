@@ -15,7 +15,7 @@ namespace peer {
 QString resolvedPeerSecretPath() {
   QByteArray envPath = qgetenv("SANE_BREAK_PEER_SECRET_FILE");
   if (!envPath.isEmpty()) return QString::fromLocal8Bit(envPath);
-  return QDir::homePath() + "/.secrets/sane-break-peer";
+  return QDir::homePath() + "/.secrets.d/sane-break-peer";
 }
 
 QByteArray loadPeerSecret(QString* outError) {

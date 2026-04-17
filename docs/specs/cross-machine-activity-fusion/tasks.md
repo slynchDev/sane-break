@@ -32,7 +32,7 @@
 ## Phase 2: Crypto and serialization
 
 - [x] **2.1** Secret file loader with permissions auto-repair
-  - New file `src/lib/peer-secret.{h,cpp}` exposing `QByteArray loadPeerSecret(QString* outError)`. Resolve path from env `SANE_BREAK_PEER_SECRET_FILE`, default `~/.secrets/sane-break-peer`. Read file, strip optional trailing newline, require exactly 64 hex characters, hex-decode to a 32-byte `QByteArray`. On permissions wider than `0600`: attempt `QFile::setPermissions(ReadOwner|WriteOwner)`; if that fails, populate `outError` and return empty. On missing/unreadable/malformed: populate `outError` with a single user-visible message naming the resolved path and return empty. Caller treats empty result as "fusion disabled, single-machine mode".
+  - New file `src/lib/peer-secret.{h,cpp}` exposing `QByteArray loadPeerSecret(QString* outError)`. Resolve path from env `SANE_BREAK_PEER_SECRET_FILE`, default `~/.secrets.d/sane-break-peer`. Read file, strip optional trailing newline, require exactly 64 hex characters, hex-decode to a 32-byte `QByteArray`. On permissions wider than `0600`: attempt `QFile::setPermissions(ReadOwner|WriteOwner)`; if that fails, populate `outError` and return empty. On missing/unreadable/malformed: populate `outError` with a single user-visible message naming the resolved path and return empty. Caller treats empty result as "fusion disabled, single-machine mode".
   - _Spec: Requirements 3.1, 3.5, 3.6_
 
 - [x] **2.2** Packet encoder
@@ -289,11 +289,11 @@
 ## Phase 11: workstation-work provisioning (parallel — different repo)
 
 - [ ] **11.1** `install.sh` generates the peer secret if absent
-  - In `~/git/workstation-work/install.sh`, before the sane-break build block: `mkdir -p ~/.secrets && chmod 0700 ~/.secrets`. If `~/.secrets/sane-break-peer` does not exist, generate inside a subshell-scoped umask so the file never exists at a wider-than-0600 mode (do NOT use `> file && chmod 0600 file`, which leaves the file world-readable for a brief race window): `(umask 177 && openssl rand -hex 32 > ~/.secrets/sane-break-peer)`. Print a numbered instruction block ending with the race-free remote-copy command: `ssh user@otherhost 'install -m 600 /dev/null ~/.secrets/sane-break-peer' && scp -p ~/.secrets/sane-break-peer user@otherhost:~/.secrets/sane-break-peer` (pre-creates the remote file at 0600, then `scp -p` preserves mode on transfer).
+  - In `~/git/workstation-work/install.sh`, before the sane-break build block: `mkdir -p ~/.secrets.d && chmod 0700 ~/.secrets.d`. If `~/.secrets.d/sane-break-peer` does not exist, generate inside a subshell-scoped umask so the file never exists at a wider-than-0600 mode (do NOT use `> file && chmod 0600 file`, which leaves the file world-readable for a brief race window): `(umask 177 && openssl rand -hex 32 > ~/.secrets.d/sane-break-peer)`. Print a numbered instruction block ending with the race-free remote-copy command: `ssh user@otherhost 'install -m 600 /dev/null ~/.secrets.d/sane-break-peer' && scp -p ~/.secrets.d/sane-break-peer user@otherhost:~/.secrets.d/sane-break-peer` (pre-creates the remote file at 0600, then `scp -p` preserves mode on transfer).
   - _Spec: Requirement 8.1_
 
 - [ ] **11.2** `install.sh` repairs wider-than-0600 permissions
-  - If `~/.secrets/sane-break-peer` exists with mode wider than `0600`: `chmod 0600` and echo a warning.
+  - If `~/.secrets.d/sane-break-peer` exists with mode wider than `0600`: `chmod 0600` and echo a warning.
   - _Depends: 11.1_
   - _Spec: Requirement 8.2_
 
@@ -317,7 +317,7 @@
   - _Spec: Requirement 10.1, 10.3_
 
 - [ ] **11.6** Verify `ws deploy` does NOT touch the secret file
-  - Manual negative test guarding Reqs 10.2 and 10.4. Capture baseline: `BEFORE=$(stat --format='%Y %i %s' ~/.secrets/sane-break-peer) && BEFORE_SHA=$(sha256sum ~/.secrets/sane-break-peer | awk '{print $1}')`. Run `scripts/ws deploy --pull` (including any install.sh subcommand path). Re-capture: `AFTER=$(stat --format='%Y %i %s' ~/.secrets/sane-break-peer) && AFTER_SHA=$(sha256sum ~/.secrets/sane-break-peer | awk '{print $1}')`. Assert `BEFORE == AFTER` AND `BEFORE_SHA == AFTER_SHA` — mtime, inode, size, and content all unchanged. Any difference means a deploy code path accidentally touched the secret; investigate and fix before shipping.
+  - Manual negative test guarding Reqs 10.2 and 10.4. Capture baseline: `BEFORE=$(stat --format='%Y %i %s' ~/.secrets.d/sane-break-peer) && BEFORE_SHA=$(sha256sum ~/.secrets.d/sane-break-peer | awk '{print $1}')`. Run `scripts/ws deploy --pull` (including any install.sh subcommand path). Re-capture: `AFTER=$(stat --format='%Y %i %s' ~/.secrets.d/sane-break-peer) && AFTER_SHA=$(sha256sum ~/.secrets.d/sane-break-peer | awk '{print $1}')`. Assert `BEFORE == AFTER` AND `BEFORE_SHA == AFTER_SHA` — mtime, inode, size, and content all unchanged. Any difference means a deploy code path accidentally touched the secret; investigate and fix before shipping.
   - _Depends: 11.1, 11.5_
   - _Spec: Requirements 10.2, 10.4_
 
@@ -335,7 +335,7 @@
   - _Spec: Requirement 9.2_
 
 - [ ] **12.3** Mirror 11.1 secret generation in `workstation-personal/install.sh`
-  - Same subshell-scoped `(umask 177 && openssl rand -hex 32 > ~/.secrets/sane-break-peer)` generation plus the `ssh ... install -m 600 ... && scp -p` copy instruction as task 11.1. Do not use the naive `> file && chmod 0600 file` pattern — it creates a race window where the secret is briefly world-readable.
+  - Same subshell-scoped `(umask 177 && openssl rand -hex 32 > ~/.secrets.d/sane-break-peer)` generation plus the `ssh ... install -m 600 ... && scp -p` copy instruction as task 11.1. Do not use the naive `> file && chmod 0600 file` pattern — it creates a race window where the secret is briefly world-readable.
   - _Spec: Requirement 9.3_
 
 - [ ] **12.4** Mirror 11.2 permissions repair
@@ -352,7 +352,7 @@
   - _Spec: Requirement 9.6_
 
 - [ ] **12.7** Verify `ws deploy` does NOT touch the secret file (workstation-personal)
-  - Mirror of task 11.6 for the personal repo: capture `stat`+`sha256sum` of `~/.secrets/sane-break-peer` before and after `scripts/ws deploy --pull` on hp or x220; assert byte-identical and mtime-identical.
+  - Mirror of task 11.6 for the personal repo: capture `stat`+`sha256sum` of `~/.secrets.d/sane-break-peer` before and after `scripts/ws deploy --pull` on hp or x220; assert byte-identical and mtime-identical.
   - _Depends: 12.3, 12.5_
   - _Spec: Requirements 10.2, 10.4_
 
