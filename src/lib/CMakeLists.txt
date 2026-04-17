@@ -9,6 +9,8 @@ add_library(
   peer-secret.h
   program-monitor.cpp
   program-monitor.h
+  remote-activity-monitor.cpp
+  remote-activity-monitor.h
   screen-lock.h
   screen-monitor.cpp
   screen-monitor.h

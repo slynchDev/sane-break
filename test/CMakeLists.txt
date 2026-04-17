@@ -34,6 +34,11 @@ target_link_libraries(test-peer-secret PRIVATE Qt::Test sane-lib)
 add_test(NAME test-peer-secret COMMAND test-peer-secret)
 add_dependencies(check test-peer-secret)
 
+add_executable(test-remote-activity-monitor test-remote-activity-monitor.cpp)
+target_link_libraries(test-remote-activity-monitor PRIVATE Qt::Test sane-lib)
+add_test(NAME test-remote-activity-monitor COMMAND test-remote-activity-monitor)
+add_dependencies(check test-remote-activity-monitor)
+
 # Screenshot harness (not part of check target)
 add_executable(
   test-screenshot test-screenshot.cpp ${CMAKE_SOURCE_DIR}/resources/index.qrc
