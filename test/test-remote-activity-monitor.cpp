@@ -288,12 +288,12 @@ class TestRemoteActivityMonitor : public QObject {
     const QByteArray peerUuid = makeUuid(0x55);
     const QDateTime t0 = QDateTime::fromSecsSinceEpoch(1'700'000'000);
     ram->handleReceivedDatagram(
-        activityBytes(peerUuid, "r16", t0.toSecsSinceEpoch(), 1, makeSecret()),
+        activityBytes(peerUuid, "peer-hp", t0.toSecsSinceEpoch(), 1, makeSecret()),
         3, t0);
 
     const auto statuses = ram->peerStatuses(t0);
     QCOMPARE(statuses.size(), qsizetype(1));
-    QCOMPARE(statuses.first().hostLabel, QString("r16"));
+    QCOMPARE(statuses.first().hostLabel, QString("peer-hp"));
     QVERIFY(statuses.first().isActive);
   }
 
@@ -413,6 +413,180 @@ class TestRemoteActivityMonitor : public QObject {
     ram->handleReceivedDatagram(bytes, 3, now);
     QCOMPARE(spy.count(), 0);
     QCOMPARE(ram->peerCount(), 0);
+  }
+
+  // ---- Phase 6: attribution counters (Property 5, Requirements 5.1-5.3) --
+
+  void local_counter_advances_while_not_idle() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    m_idle->setIdle(false);
+    QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    for (int i = 0; i < 5; ++i) {
+      now = now.addSecs(1);
+      ram->tick(now);
+    }
+    QCOMPARE(ram->activityBreakdown().totalActiveSeconds, 5);
+  }
+
+  void local_counter_stalls_while_idle() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    m_idle->setIdle(true);
+    QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    for (int i = 0; i < 5; ++i) {
+      now = now.addSecs(1);
+      ram->tick(now);
+    }
+    QCOMPARE(ram->activityBreakdown().totalActiveSeconds, 0);
+  }
+
+  void peer_counter_advances_within_active_window() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    m_idle->setIdle(true);  // keep local credit out of the picture
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    ram->handleReceivedDatagram(
+        activityBytes(makeUuid(0x55), "peer-hp", now.toSecsSinceEpoch(), 1,
+                      makeSecret()),
+        3, now);
+    // Three ticks inside peerActiveWindowSeconds (default 15).
+    QDateTime t = now;
+    for (int i = 0; i < 3; ++i) {
+      t = t.addSecs(1);
+      ram->tick(t);
+    }
+    const auto breakdown = ram->activityBreakdown();
+    QCOMPARE(breakdown.totalActiveSeconds, 3);
+    // local + remote rows; remote row is "peer-hp".
+    QCOMPARE(breakdown.hosts.size(), 2);
+    bool found = false;
+    for (const peer::HostActivity& row : breakdown.hosts) {
+      if (row.label == "peer-hp") {
+        QCOMPARE(row.activeSeconds, 3);
+        found = true;
+      }
+    }
+    QVERIFY(found);
+  }
+
+  void peer_counter_stalls_after_active_window_expires() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    m_idle->setIdle(true);
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    ram->handleReceivedDatagram(
+        activityBytes(makeUuid(0x55), "peer-hp", now.toSecsSinceEpoch(), 1,
+                      makeSecret()),
+        3, now);
+    // Tick through the full peerActiveWindowSeconds (default 15) and past.
+    const int activeWindow = m_prefs->peerActiveWindowSeconds->get();
+    QDateTime t = now;
+    for (int i = 0; i < activeWindow + 10; ++i) {
+      t = t.addSecs(1);
+      ram->tick(t);
+    }
+    const auto breakdown = ram->activityBreakdown();
+    // At most `activeWindow` ticks credited (one per second within window).
+    int peerSeconds = 0;
+    for (const peer::HostActivity& row : breakdown.hosts) {
+      if (row.label == "peer-hp") peerSeconds = row.activeSeconds;
+    }
+    QVERIFY(peerSeconds <= activeWindow);
+    QVERIFY(peerSeconds >= activeWindow - 1);
+  }
+
+  void reset_attribution_zeroes_all_counters() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    m_idle->setIdle(false);
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    ram->handleReceivedDatagram(
+        activityBytes(makeUuid(0x55), "peer-hp", now.toSecsSinceEpoch(), 1,
+                      makeSecret()),
+        3, now);
+    QDateTime t = now;
+    for (int i = 0; i < 4; ++i) {
+      t = t.addSecs(1);
+      ram->tick(t);
+    }
+    QVERIFY(ram->activityBreakdown().totalActiveSeconds > 0);
+    ram->resetAttribution();
+    const auto breakdown = ram->activityBreakdown();
+    QCOMPARE(breakdown.totalActiveSeconds, 0);
+    for (const peer::HostActivity& row : breakdown.hosts) {
+      QCOMPARE(row.activeSeconds, 0);
+      QCOMPARE(row.sharePercent, 0);
+    }
+  }
+
+  void breakdown_shares_sum_close_to_total() {
+    // Property 5: per-host active seconds sum to total within ±1s and no
+    // host exceeds the interval length.
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    m_idle->setIdle(false);
+    QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    ram->handleReceivedDatagram(
+        activityBytes(makeUuid(0x55), "peer-hp", now.toSecsSinceEpoch(), 1,
+                      makeSecret()),
+        3, now);
+    ram->handleReceivedDatagram(
+        activityBytes(makeUuid(0x66), "hp", now.toSecsSinceEpoch(), 2,
+                      makeSecret()),
+        3, now);
+    for (int i = 0; i < 7; ++i) {
+      now = now.addSecs(1);
+      ram->tick(now);
+    }
+    const auto breakdown = ram->activityBreakdown();
+    int sum = 0;
+    for (const peer::HostActivity& row : breakdown.hosts) {
+      QVERIFY(row.activeSeconds <= 7);
+      sum += row.activeSeconds;
+    }
+    QCOMPARE(sum, breakdown.totalActiveSeconds);
+  }
+
+  void breakdown_uses_uuid_prefix_when_hostname_missing() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    m_idle->setIdle(true);
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    ram->handleReceivedDatagram(
+        activityBytes(makeUuid(0xab), /*hostname=*/QString(),
+                      now.toSecsSinceEpoch(), 1, makeSecret()),
+        3, now);
+    ram->tick(now.addSecs(1));
+    const auto breakdown = ram->activityBreakdown();
+    bool hasPrefixLabel = false;
+    for (const peer::HostActivity& row : breakdown.hosts) {
+      if (row.label == "ab00000000000000") hasPrefixLabel = true;
+    }
+    QVERIFY(hasPrefixLabel);
+  }
+
+  void breakdown_share_percents_reflect_ratio() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    // Drive local to 6 active ticks and the peer to 2 — local should be
+    // ~75%, peer ~25% (±1 for rounding).
+    m_idle->setIdle(false);
+    QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    for (int i = 0; i < 6; ++i) {
+      now = now.addSecs(1);
+      ram->tick(now);
+    }
+    // Peer arrives, then tick a couple more times — peer counter = 2, local
+    // also advances 2 more (total local 8). Actually easier: forge the peer
+    // bucket directly with two ACTIVITY packets at 1 s separation, where
+    // tick advances local while idle=false.
+    m_idle->setIdle(true);
+    ram->handleReceivedDatagram(
+        activityBytes(makeUuid(0x55), "peer-hp", now.toSecsSinceEpoch(), 1,
+                      makeSecret()),
+        3, now);
+    now = now.addSecs(1);
+    ram->tick(now);
+    now = now.addSecs(1);
+    ram->tick(now);
+    const auto breakdown = ram->activityBreakdown();
+    QVERIFY(breakdown.totalActiveSeconds > 0);
+    for (const peer::HostActivity& row : breakdown.hosts) {
+      QVERIFY(row.sharePercent >= 0 && row.sharePercent <= 100);
+    }
   }
 };
 

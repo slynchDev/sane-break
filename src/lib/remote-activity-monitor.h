@@ -44,6 +44,20 @@ struct PeerStatus {
   bool isActive = false;
 };
 
+// One row of the per-host attribution breakdown exposed to the tray
+// tooltip and stats window. `sharePercent` is rounded to the nearest
+// integer so a full breakdown need not sum to exactly 100.
+struct HostActivity {
+  QString label;
+  int activeSeconds = 0;
+  int sharePercent = 0;
+};
+
+struct ActivityBreakdown {
+  QList<HostActivity> hosts;
+  int totalActiveSeconds = 0;
+};
+
 // Subscribes to signed peer activity packets on the LAN, maintains per-peer
 // liveness state, and exposes an aggregate peerActivityChanged(bool) signal
 // consumed by EffectiveIdleTime.
@@ -95,6 +109,14 @@ class RemoteActivityMonitor : public QObject {
   // socket. Used by the host app's rebind-failure-revert path (Req 7.8).
   bool isRunning() const { return m_running; }
   QList<PeerStatus> peerStatuses(const QDateTime& now) const;
+
+  // Per-host active-seconds attribution. Counters accumulate on every
+  // tick() while local (or the named peer) is active, and reset atomically
+  // via resetAttribution() — called by SaneBreakApp on AppContext::breakStart.
+  // activityBreakdown() reads in-memory state only; safe from the GUI
+  // thread.
+  ActivityBreakdown activityBreakdown() const;
+  void resetAttribution();
 
   // Test hooks — safe to call from tests that bypass start() to avoid real
   // socket binding. Production code never calls these.
@@ -149,6 +171,10 @@ class RemoteActivityMonitor : public QObject {
   // Per-interface-index last-error timestamp for rate-limited transmit-failure
   // logging (at most once per interface per 60 s).
   QHash<int, QDateTime> m_lastSendWarnAt;
+  // Seconds the local machine has been non-idle since the last break
+  // start. Paired with PeerState::activeSecondsSinceLastBreak for remote
+  // hosts; both are advanced by tick() and cleared by resetAttribution().
+  int m_localActiveSecondsSinceLastBreak = 0;
 };
 
 }  // namespace peer

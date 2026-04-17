@@ -328,18 +328,74 @@ void RemoteActivityMonitor::sendToAllInterfaces(const QByteArray& bytes,
 
 void RemoteActivityMonitor::tick(const QDateTime& now) {
   const int unreachableWindow = m_prefs->peerUnreachableWindowSeconds->get();
+  const int activeWindow = m_prefs->peerActiveWindowSeconds->get();
   for (auto it = m_peers.begin(); it != m_peers.end();) {
-    const PeerState& ps = it.value();
+    PeerState& ps = it.value();
     const QDateTime lastSeen = std::max(ps.lastSeenActive, ps.lastSeenIdle);
     if (!lastSeen.isValid() || lastSeen.secsTo(now) > unreachableWindow) {
       it = m_peers.erase(it);
-    } else {
-      ++it;
+      continue;
     }
+    // Per-peer attribution (Req 5.2): one second of credit per tick while
+    // the peer is in the active window. Matches computeAnyPeerActive()'s
+    // predicate exactly.
+    if (ps.lastState == PeerLastState::Active && ps.lastSeenActive.isValid() &&
+        ps.lastSeenActive.secsTo(now) <= activeWindow) {
+      ++ps.activeSecondsSinceLastBreak;
+    }
+    ++it;
+  }
+  // Local attribution: credit the local counter for each tick the raw
+  // local SystemIdleTime reports non-idle. Uses the raw timer, not the
+  // facade, to keep the attribution local (peer state does not change
+  // local work credit).
+  if (m_localIdle && !m_localIdle->isIdle()) {
+    ++m_localActiveSecondsSinceLastBreak;
   }
   // Always recompute — bounds the active-window → idle transition to 1 s
   // even for peers that simply stop broadcasting.
   recomputeAnyPeerActive(now);
+}
+
+void RemoteActivityMonitor::resetAttribution() {
+  m_localActiveSecondsSinceLastBreak = 0;
+  for (auto it = m_peers.begin(); it != m_peers.end(); ++it) {
+    it.value().activeSecondsSinceLastBreak = 0;
+  }
+}
+
+ActivityBreakdown RemoteActivityMonitor::activityBreakdown() const {
+  ActivityBreakdown out;
+  // Local entry always appears, even when its counter is zero, so the UI
+  // can distinguish "no remote work yet" from "no peers present".
+  HostActivity localRow;
+  localRow.label = QHostInfo::localHostName();
+  localRow.activeSeconds = m_localActiveSecondsSinceLastBreak;
+  out.hosts.append(localRow);
+  out.totalActiveSeconds += localRow.activeSeconds;
+
+  for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it) {
+    const PeerState& ps = it.value();
+    HostActivity row;
+    row.label = ps.hostname.isEmpty()
+                    ? QString::fromLatin1(it.key().left(8).toHex())
+                    : ps.hostname;
+    row.activeSeconds = ps.activeSecondsSinceLastBreak;
+    out.hosts.append(row);
+    out.totalActiveSeconds += row.activeSeconds;
+  }
+
+  if (out.totalActiveSeconds > 0) {
+    for (HostActivity& row : out.hosts) {
+      // Round to nearest integer percent. The list may not sum to exactly
+      // 100 due to rounding — callers format rows independently.
+      row.sharePercent = static_cast<int>(
+          (static_cast<double>(row.activeSeconds) * 100.0 /
+               static_cast<double>(out.totalActiveSeconds) +
+           0.5));
+    }
+  }
+  return out;
 }
 
 bool RemoteActivityMonitor::computeAnyPeerActive(const QDateTime& now) const {

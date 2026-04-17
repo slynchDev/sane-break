@@ -144,28 +144,28 @@
 
 ## Phase 6: Per-peer attribution counters
 
-- [ ] **6.1** `activeSecondsSinceLastBreak` counters
-  - In `RemoteActivityMonitor`, add `int m_localActiveSecondsSinceLastBreak = 0` and per-peer `activeSecondsSinceLastBreak` in `PeerState`. Start a 1-second tick timer in `start()`. On each tick: if local is non-idle, increment the local counter by 1; for each peer considered active (same rule as `computeAnyPeerActive`), increment that peer's counter by 1.
+- [x] **6.1** `activeSecondsSinceLastBreak` counters
+  - `RemoteActivityMonitor` gains `int m_localActiveSecondsSinceLastBreak = 0` and each `PeerState` already carries `activeSecondsSinceLastBreak`. The existing 1-second `tick()` (shared with the offline-cleanup / aggregate-recompute path per 3.5) now advances these counters in the same pass: for each peer whose state matches the `computeAnyPeerActive` predicate, `++activeSecondsSinceLastBreak`; if `m_localIdle` reports non-idle, `++m_localActiveSecondsSinceLastBreak`.
   - _Depends: 3.1, 3.4_
   - _Spec: Requirement 5.2_
 
-- [ ] **6.2** Reset counters on `AppContext::breakStart`
-  - `AppDependencies` wiring (Phase 9) connects `AppContext::breakStart` to `RemoteActivityMonitor::resetAttribution()`. `resetAttribution()` zeros the local counter and every peer's counter atomically on the GUI thread.
+- [x] **6.2** Reset counters on `AppContext::breakStart`
+  - `RemoteActivityMonitor::resetAttribution()` zeros the local counter and every `PeerState::activeSecondsSinceLastBreak` atomically on the GUI thread (no locking required — all updates happen in the Qt event loop thread).
   - _Depends: 1.4, 6.1_
   - _Spec: Requirements 5.1, 5.2_
 
-- [ ] **6.3** `activityBreakdown()` method
-  - Public method returning `struct ActivityBreakdown { QList<HostActivity> hosts; int totalActiveSeconds; }` where `HostActivity { QString label; int activeSeconds; int sharePercent; }`. Label is peer hostname (fallback: first 8 hex chars of sender_uuid) for peers and `QHostInfo::localHostName()` for local. Callable from the GUI thread; reads in-memory counters only, no I/O.
+- [x] **6.3** `activityBreakdown()` method
+  - Returns `ActivityBreakdown { QList<HostActivity> hosts; int totalActiveSeconds; }` where `HostActivity { QString label; int activeSeconds; int sharePercent; }`. Local row always comes first (label = `QHostInfo::localHostName()`), then one row per peer (label = peer hostname, falling back to first 8 hex chars of sender_uuid when the hostname is absent). `sharePercent` is rounded to the nearest integer — rows are not guaranteed to sum to exactly 100, matching typical tooltip formatting expectations. Reads in-memory only, no I/O.
   - _Depends: 6.1_
   - _Spec: Requirements 5.2, 5.6_
 
-- [ ] **6.4** Unit tests for attribution
-  - Tests: counters tick correctly for local + per-peer active seconds; breakStart resets all to 0; `activityBreakdown()` totals match per-host sum within ±1 s (Property 5); unknown-hostname peer gets a uuid-prefix label.
+- [x] **6.4** Unit tests for attribution
+  - `test/test-remote-activity-monitor.cpp` gains: `local_counter_advances_while_not_idle`, `local_counter_stalls_while_idle`, `peer_counter_advances_within_active_window`, `peer_counter_stalls_after_active_window_expires`, `reset_attribution_zeroes_all_counters`, `breakdown_shares_sum_close_to_total` (Property 5 pin), `breakdown_uses_uuid_prefix_when_hostname_missing`, `breakdown_share_percents_reflect_ratio`.
   - _Depends: 6.2, 6.3_
   - _Spec: Requirements 5.1-5.3, 5.6; Property 5_
 
-- [ ] **6.5** Peer status accessor for live indicator
-  - Add `QList<PeerStatus> peerStatuses() const` to `RemoteActivityMonitor` returning `struct PeerStatus { QString hostLabel; QDateTime lastSeenActive; QDateTime lastSeenIdle; bool isActive; }` per peer (plus optionally a local entry). Used by the preferences window's live indicator (task 10.3). Distinct from `activityBreakdown()`, which stays attribution-focused (label / activeSeconds / sharePercent). Reads only in-memory peer state; no I/O.
+- [x] **6.5** Peer status accessor for live indicator
+  - Already implemented in Phase 3 as `QList<PeerStatus> peerStatuses(const QDateTime& now) const`. The method computes `isActive` at call-time against the supplied `now` so stats display does not race with the tick cadence.
   - _Depends: 3.1, 3.3_
   - _Spec: Requirement 7.2_
 
@@ -255,9 +255,8 @@
   - _Depends: 9.1, 9.3_
   - _Spec: Requirement 7.8_
 
-- [!] **9.5** Wire break-transition signals
-  - Connect `AppContext::breakStart` → `ram->resetAttribution()` (from task 6.2). Verify `breakStart` fires on every break entry path (normal tick expiry, EndMeetingBreakNow, BigBreakNow, etc.) by inspecting `AppStateBreak::enter()` — since the signal is emitted there, coverage is automatic.
-  - **Blocked**: depends on Phase 6 task 6.2 (`RemoteActivityMonitor::resetAttribution()` method definition). Once Phase 6 lands, the wiring is a single `connect(this, &AppContext::breakStart, m_ram, &peer::RemoteActivityMonitor::resetAttribution)` line in the `if (m_ram)` block of `SaneBreakApp::SaneBreakApp`.
+- [x] **9.5** Wire break-transition signals
+  - Unblocked once Phase 6 landed `resetAttribution()`. The wiring is a single `connect(this, &AppContext::breakStart, m_ram, &peer::RemoteActivityMonitor::resetAttribution)` call in the `if (m_ram)` block of `SaneBreakApp::SaneBreakApp`. Because the `breakStart` signal is emitted from `AppStateBreak::enter()` (Phase 1 task 1.4), every break-entry path — normal tick expiry, `BigBreakNow`, `EndMeetingBreakNow`, focus-mode entry — triggers it automatically.
   - _Depends: 9.1, 6.2, 1.4_
   - _Spec: Requirements 5.1, 5.2_
 

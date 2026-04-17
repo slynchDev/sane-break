@@ -66,6 +66,12 @@ SaneBreakApp::SaneBreakApp(const AppDependencies& deps, QObject* parent)
             &SaneBreakApp::onPeerBindingChanged);
     connect(preferences->peerBroadcastInterfaces, &SettingWithSignal::changed, this,
             &SaneBreakApp::onPeerBindingChanged);
+    // Task 9.5: breakStart is emitted from AppStateBreak::enter() on every
+    // break-entry path (normal expiry, BigBreakNow, EndMeetingBreakNow, etc.),
+    // so a single connect hits all of them. resetAttribution() zeros the
+    // local and per-peer active-seconds counters for the new cycle.
+    connect(this, &AppContext::breakStart, m_ram,
+            &peer::RemoteActivityMonitor::resetAttribution);
   }
 
   connect(this, &SaneBreakApp::trayDataUpdated, tray, &StatusTrayWindow::update);
