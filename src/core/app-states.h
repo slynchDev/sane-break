@@ -101,6 +101,13 @@ class AppContext : public QObject {
   void exitCurrentState();
   void checkBreakReadiness();
 
+ signals:
+  // Emitted from AppStateBreak::enter() / AppStateBreak::exit() so peer-aware
+  // code (e.g. RemoteActivityMonitor) can reset per-peer attribution counters
+  // on break transitions without coupling AppStateBreak to peer logic.
+  void breakStart();
+  void breakEnd();
+
  protected:
   std::unique_ptr<AppState> m_currentState;
 

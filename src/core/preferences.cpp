@@ -113,4 +113,15 @@ SanePreferences::SanePreferences(QSettings* settings, QObject* parent)
   autoStart = new Setting<bool>(settings, "auto-start", false);
   autoScreenLock = new Setting<int>(settings, "break/auto-screen-lock", 0);
   quickBreak = new Setting<bool>(settings, "break/quick-break", false);
+
+  peerFusionEnabled = new Setting<bool>(settings, "peer/fusion-enabled", false);
+  peerListenPort = new Setting<int>(settings, "peer/listen-port", 45454);
+  peerActiveWindowSeconds =
+      new Setting<int>(settings, "peer/active-window-seconds", 15);
+  peerUnreachableWindowSeconds =
+      new Setting<int>(settings, "peer/unreachable-window-seconds", 60);
+  peerHeartbeatIntervalSeconds =
+      new Setting<int>(settings, "peer/heartbeat-interval-seconds", 5);
+  peerBroadcastInterfaces =
+      new Setting<QStringList>(settings, "peer/broadcast-interfaces", QStringList());
 }

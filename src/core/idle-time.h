@@ -32,7 +32,7 @@ class COREIDLE_EXPORT SystemIdleTime : public QObject {
   int minIdleTime() { return m_minIdleTime; }
   virtual void setWatchAccuracy(int accuracy) = 0;
   virtual void setMinIdleTime(int idleTime) = 0;
-  bool isIdle() { return m_isIdle; }
+  virtual bool isIdle() { return m_isIdle; }
  signals:
   void idleStart();
   void idleEnd();

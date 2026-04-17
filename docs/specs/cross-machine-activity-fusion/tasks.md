@@ -7,23 +7,23 @@
 
 ## Phase 1: Foundations
 
-- [ ] **1.1** Add `Qt6::Network` to build
+- [x] **1.1** Add `Qt6::Network` to build
   - Add `find_package(Qt6 COMPONENTS Network REQUIRED)` and link `Qt6::Network` to the `sane-lib` target in `src/lib/CMakeLists.txt`. Required for `QUdpSocket`. `QMessageAuthenticationCode`, `QHostInfo`, and `QUuid` are in Qt Core — no additional linkage needed.
   - _Spec: Constraints_
 
-- [ ] **1.2** Declare peer preferences in `SanePreferences`
+- [x] **1.2** Declare peer preferences in `SanePreferences`
   - Add six `Setting<T>*` fields to `src/core/preferences.h` with exact INI keys and defaults: `peerFusionEnabled` (bool `peer/fusion-enabled`, default `false`), `peerListenPort` (int `peer/listen-port`, default `45454`, range 1024-65535), `peerActiveWindowSeconds` (int `peer/active-window-seconds`, default `15`, range 5-120), `peerUnreachableWindowSeconds` (int `peer/unreachable-window-seconds`, default `60`, range 15-600), `peerHeartbeatIntervalSeconds` (int `peer/heartbeat-interval-seconds`, default `5`, range 1-30), `peerBroadcastInterfaces` (QStringList `peer/broadcast-interfaces`, default empty). Instantiate in the `SanePreferences` constructor body in `src/core/preferences.cpp`. Range validation happens in the preferences UI layer, not here.
   - _Spec: Requirement 7.1_
 
-- [ ] **1.3** Define wire-format constants and `Packet` struct
+- [x] **1.3** Define wire-format constants and `Packet` struct
   - Create `src/lib/peer-packet.h` with: `static constexpr char kMagic[4] = {'S', 'B', 'P', 'A'};` (raw bytes — do NOT use the `uint32_t kMagic = 'SBPA'` multi-character-literal form; its value is implementation-defined per the C++ standard and naive integer serialization would be host-endian-dependent, which would make little-endian and big-endian peers unable to talk to each other). Add `kVersion = 0x01`, `kKeyIdV1 = 0x00`, `kMaxPacketBytes = 512`, `kMaxHostnameBytes = 63`, `kMinPacketBytes` (header bytes), event-type enum values (`ACTIVITY = 0x01`, `IDLE_TRANSITION = 0x02`), and state enum values (`STATE_IDLE = 0x00`, `STATE_ACTIVE = 0x01`). Define a `Packet` struct with fields for `senderUuid`, `hostname`, `timestamp`, `nonce`, `eventType`, and a `QByteArray payload`. No encode/decode logic yet — that lives in task 2.2/2.3.
   - _Spec: Requirements 4.1-4.8_
 
-- [ ] **1.4** Add `breakStart()` / `breakEnd()` signals to `AppContext`
+- [x] **1.4** Add `breakStart()` / `breakEnd()` signals to `AppContext`
   - Add two Qt signals `void breakStart();` and `void breakEnd();` to `AppContext` in `src/core/app-states.h`. Emit `breakStart` at the top of `AppStateBreak::enter()` (right after `openCurrentSpan("break", ...)`) and `breakEnd` at the end of `AppStateBreak::exit()` (right after `closeCurrentSpan()`). These signals let `RemoteActivityMonitor` reset per-peer attribution counters atomically on break transitions, without coupling `AppStateBreak` to peer logic.
   - _Spec: Requirement 5.1_
 
-- [ ] **1.5** Make `SystemIdleTime::isIdle()` virtual
+- [x] **1.5** Make `SystemIdleTime::isIdle()` virtual
   - Change `bool isIdle()` in `src/core/idle-time.h:35` from a non-virtual inline getter to `virtual bool isIdle() { return m_isIdle; }`. No behavior change for existing callers. Required so `EffectiveIdleTime` (task 5.1) can override `isIdle()` to return the fused `localIdle && !anyPeerActive` value consumed synchronously by `AppStateBreak::enter()` and `BreakPhaseFullScreen::tick()`.
   - _Spec: Requirement 2.5_
 
