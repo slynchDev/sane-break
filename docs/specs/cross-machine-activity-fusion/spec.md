@@ -200,6 +200,22 @@ The feature is strictly additive: with `peerFusionEnabled=false`, an absent or m
 4. WHEN the listen port is already bound by another process, THE RemoteActivityMonitor SHALL log a user-visible warning and disable fusion for this session without crashing.
 5. WHEN the send socket fails to transmit on a given interface (e.g., interface went down), THE RemoteActivityMonitor SHALL log at debug level once per interface per 60 s and continue attempting.
 
+### Requirement 12: Cross-peer meeting awareness
+
+**User Story:** As a user with a meeting running on one machine, I want peer machines to learn about the meeting and pause their own break scheduling, so an inactive peer does not fire ghost break cycles during the call or ambush me with a break right after I KVM-switch back.
+
+#### Acceptance Criteria
+
+1. THE wire format SHALL carry a new `event_type = 0x03` (EVENT_MEETING_TRANSITION) with a 1-byte payload: `0x00 = MEETING_ENDED`, `0x01 = MEETING_STARTED`. Decoder rejects any other payload size or state byte silently.
+2. THE AppContext SHALL expose Qt signals `meetingStart()` and `meetingEnd()` emitted from `AppStateMeeting::enter()` / `AppStateMeeting::exit()` respectively. Emission is synchronous with the existing `openMeetingSpan` / `closeCurrentSpan` calls.
+3. THE RemoteActivityMonitor SHALL provide slots `broadcastMeetingStart()` / `broadcastMeetingEnd()` wired to those signals. Each slot emits a signed MEETING_TRANSITION packet on every allowlisted interface.
+4. THE PeerState SHALL gain an `inMeeting` bool + `lastSeenMeetingTransition` timestamp. Inbound MEETING_TRANSITION packets update only these fields — `lastSeenActive`, `lastSeenIdle`, and `lastState` are not mutated by MEETING packets, so the existing fused-idle semantics (localIdle AND NOT anyPeerActive) are unchanged.
+5. THE RemoteActivityMonitor SHALL expose `anyPeerInMeeting()` and emit `peerMeetingChanged(bool)` on aggregate transitions, computed as the OR of `PeerState::inMeeting` across all non-offline peers.
+6. THE `flags.h` PauseReason enum SHALL gain `PeerMeeting = 1 << 5`. `SaneBreakApp` SHALL connect `peerMeetingChanged` → `onPauseRequest(PauseReason::PeerMeeting)` for true and `onResumeRequest(PauseReason::PeerMeeting)` for false, consuming the existing pause machinery (including its long-pause cycle-reset semantics on resume).
+7. THE `tick()` eviction recency check SHALL consider `lastSeenMeetingTransition` as a liveness signal — a peer that sends only MEETING packets (quiet listening, no keyboard activity) SHALL NOT be evicted while its last MEETING timestamp is within `peerUnreachableWindowSeconds`.
+8. THE `stop()` teardown SHALL clear `m_anyPeerInMeeting` and emit `peerMeetingChanged(false)` if the cached value was true.
+9. THE loopback drop for `sender_uuid == m_senderUuid` already in the receive path SHALL apply unchanged to MEETING packets, so a local host does not self-pause from its own meeting.
+
 ## Diagrams
 
 ### Component Diagram

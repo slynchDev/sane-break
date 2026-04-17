@@ -414,3 +414,58 @@
   - Skipped in this repo — the matrix lives in the workstation-work and workstation-personal repos, which own the `scripts/ws doctor` implementation targeted by Property 8. Tasks 11.3 and 12.5 (in those repos) carry the assertion logic; this manual matrix is executed from there.
   - _Depends: 11.3, 12.5_
   - _Spec: Property 8; Requirements 8.1, 8.3, 9.3, 9.5_
+
+---
+
+## Phase 14: Cross-peer meeting awareness
+
+Closes the ambush-break scenario that STATUS.md called out as the branch's
+marquee known gap. Additive on top of phases 1–13; no rebase or API break.
+
+- [x] **14.1** Wire format: EVENT_MEETING_TRANSITION + MeetingState enum
+  - Added `EVENT_MEETING_TRANSITION = 0x03` to `peer::EventType` and a new `peer::MeetingState` enum with `MEETING_ENDED = 0x00` / `MEETING_STARTED = 0x01`. Decoder extended to accept the new event type, require 1-byte payload, and reject out-of-range state bytes silently.
+  - _Depends: 2.2_
+  - _Spec: Requirement 12.1_
+
+- [x] **14.2** RemoteActivityMonitor: builder + broadcast slots
+  - `buildMeetingTransitionPacket(now, state)` mirroring `buildIdleTransitionPacket`. `broadcastMeetingStart()` / `broadcastMeetingEnd()` public slots that emit on every allowlisted interface.
+  - _Depends: 14.1, 4.4_
+  - _Spec: Requirement 12.3_
+
+- [x] **14.3** PeerState: inMeeting + lastSeenMeetingTransition
+  - New fields, updated by the receive handler on EVENT_MEETING_TRANSITION. `lastSeenActive` / `lastSeenIdle` / `lastState` intentionally untouched by MEETING packets to preserve the existing fused-idle semantics.
+  - _Depends: 14.1_
+  - _Spec: Requirements 12.4_
+
+- [x] **14.4** Aggregate: anyPeerInMeeting + peerMeetingChanged signal
+  - `computeAnyPeerInMeeting()` OR-reduces `PeerState::inMeeting` over the current peer map. `recomputeAnyPeerActive()` now also recomputes the meeting aggregate and emits `peerMeetingChanged(bool)` on transitions.
+  - _Depends: 14.3_
+  - _Spec: Requirement 12.5_
+
+- [x] **14.5** tick() eviction recency + stop() teardown
+  - `tick()` considers `lastSeenMeetingTransition` alongside `lastSeenActive` / `lastSeenIdle` when computing liveness — so a passive-listening peer that sends only MEETING packets isn't prematurely evicted. `stop()` clears the meeting aggregate and emits `peerMeetingChanged(false)` if it was true.
+  - _Depends: 14.4_
+  - _Spec: Requirements 12.7, 12.8_
+
+- [x] **14.6** AppContext signals + AppStateMeeting wiring
+  - `meetingStart()` / `meetingEnd()` signals on `AppContext`. `AppStateMeeting::enter()` emits `meetingStart`, `::exit()` emits `meetingEnd`. Mirrors the existing breakStart/End pattern so every meeting-entry path (audio detection, manual toggle, `autoMeetingOnApp=true`) is covered by a single connect site.
+  - _Depends: 14.2_
+  - _Spec: Requirement 12.2_
+
+- [x] **14.7** PauseReason::PeerMeeting consumer
+  - `PauseReason::PeerMeeting = 1 << 5` in `flags.h`. `SaneBreakApp` connects `peerMeetingChanged` → `onPauseRequest` / `onResumeRequest` with that reason. Reuses the existing `AppStatePaused` machinery including its long-pause cycle-reset semantics.
+  - _Depends: 14.4, 14.6_
+  - _Spec: Requirement 12.6_
+
+- [x] **14.8** Property tests (8 RAM cases + 3 packet cases)
+  - `test-remote-activity-monitor.cpp`: started/ended/orthogonal/idempotent/loopback/offline/passive-liveness/build-shape.
+  - `test-peer-packet.cpp`: round-trip started + ended, payload-size rejection, state-byte rejection.
+  - All 11 pass deterministically without QEventLoop / sleep.
+  - _Depends: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7_
+  - _Spec: Requirement 12 (all criteria)_
+
+- [x] **14.9** Spec + STATUS sync
+  - spec.md: new Requirement 12 with 9 acceptance criteria.
+  - STATUS.md: Known-gap section replaced with "Phase 14 (shipped)" describing what it does, the previously-broken scenario now fixed, and the safety properties under test. Status-line updated — the sole remaining gap is workstation-repo provisioning.
+  - _Depends: 14.1–14.8_
+  - _Spec: Requirement 12; STATUS_

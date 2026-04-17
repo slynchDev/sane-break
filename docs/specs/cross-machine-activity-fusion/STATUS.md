@@ -148,7 +148,7 @@ MTU; not fragmentable.
 
 ### Completed and on the branch
 
-11 of 13 phases from `tasks.md` land on this branch:
+12 of 13 phases from `tasks.md` land on this branch, plus Phase 14:
 
 | Phase | Content |
 |-------|---------|
@@ -163,9 +163,10 @@ MTU; not fragmentable.
 | 9 | AppDependencies wiring: ram construction, facade injection, runtime toggle, rebind-with-revert, breakStart connect |
 | 10 | Preferences UI for the six peer settings + live-indicator list |
 | 13 | Property-test mapping + migration-failure test + manual KVM procedure doc |
+| 14 | Cross-peer meeting awareness: EVENT_MEETING_TRANSITION + AppContext meetingStart/End + PauseReason::PeerMeeting + tests |
 
-Test coverage: 7 test binaries, ~175 tests, 100% pass at `HEAD=2253658`.
-Release build produces a working `sane-break` binary.
+Test coverage after Phase 14: 7 test binaries, ~186 tests, 100% pass
+at the branch tip. Release build produces a working `sane-break` binary.
 
 ### Not on the branch, still deferred
 
@@ -174,66 +175,77 @@ Release build produces a working `sane-break` binary.
 - **13.11** (provisioning determinism matrix) — exercised from the
   workstation repos, not from here
 
-## Known gap: no cross-peer meeting awareness
+## Cross-peer meeting awareness — Phase 14 (shipped)
 
-The branch fuses idle state only. The wire format has exactly two event
-types (ACTIVITY, IDLE_TRANSITION); there is no `EVENT_MEETING_TRANSITION`.
-Meeting-aware pause is applied purely locally by each instance from its
-own audio-stream detection.
+Implemented on this branch via commits `3ad35b6` (scaffold), `63c5dc6`
+(broadcast wiring), `c7f1649` (PauseReason consumer), and `54ff5d4`
+(property tests). Closes the ambush-break scenario that was the
+marquee known gap of the previous branch revision.
 
-### Consequence
+### What Phase 14 does
+
+- New wire event: `EVENT_MEETING_TRANSITION = 0x03`, payload 1 byte
+  (`0x00 = MEETING_ENDED`, `0x01 = MEETING_STARTED`), signed under the
+  same HMAC + key_id framework as the other events.
+- `AppContext::meetingStart()` / `meetingEnd()` emit from
+  `AppStateMeeting::enter/exit`. Wired to
+  `RemoteActivityMonitor::broadcastMeetingStart/End` alongside the
+  existing `breakStart` → `resetAttribution` connect.
+- `PeerState` gains `inMeeting` + `lastSeenMeetingTransition`. MEETING
+  packets update those fields only — they do NOT mutate
+  `lastSeenActive`, `lastSeenIdle`, or `lastState`, so the fused-idle
+  formula (localIdle AND NOT anyPeerActive) is unchanged.
+- `anyPeerInMeeting()` aggregate + `peerMeetingChanged(bool)` signal
+  recomputed on every receive and every 1-s tick (so a peer that
+  disappears mid-meeting clears the aggregate within
+  `peerUnreachableWindowSeconds`).
+- `SaneBreakApp` consumes the signal via `PauseReason::PeerMeeting`
+  (new `1 << 5` bit in the existing `flags.h` enum). `onPauseRequest`
+  / `onResumeRequest` on true / false transitions. This reuses the
+  existing `AppStatePaused` machinery — including its long-pause
+  cycle-reset semantics on resume — so the ambush-break scenario
+  below is closed without adding a new AppState.
+
+### Scenario previously broken, now fixed
 
 During a Zoom call on r16 with hp running peer-fusion:
 
-1. r16 detects the meeting → `AppStateMeeting` → local breaks suspended.
-2. r16 keeps broadcasting ACTIVITY (notes, clicks) throughout the call.
-3. hp sees peer activity → `EffectiveIdleTime` suppresses idle → hp's
-   countdown ticks down normally.
-4. Over a 45-minute call hp fires 2-3 ghost break cycles that the user
-   never sees (KVM focused on r16). Cycle counter advances on hp;
-   big-break scheduling shifts.
-5. Call ends, r16 runs `endMeetingBreakLater(smallEvery)` and starts a
-   fresh cycle. hp is deep into "about to fire".
-6. User swaps KVM to hp to process meeting notes. hp fires a break
-   within seconds — ambushing the user right as they sit down to focus.
+1. r16 detects the meeting → `AppStateMeeting::enter` → emits
+   `meetingStart` → broadcasts MEETING_STARTED.
+2. hp receives MEETING_STARTED → `peerMeetingChanged(true)` →
+   `onPauseRequest(PauseReason::PeerMeeting)` → hp enters paused state.
+3. Over the 45-minute call hp's break scheduler is paused. No ghost
+   cycles.
+4. Call ends, r16 emits `meetingEnd` → broadcasts MEETING_ENDED.
+5. hp receives MEETING_ENDED → `peerMeetingChanged(false)` →
+   `onResumeRequest(PauseReason::PeerMeeting)` → hp resumes, and the
+   long-pause cycle-reset logic in the existing pause machinery kicks
+   in (for any meeting longer than `Reset cycle after paused for`,
+   which is typically minutes). The cycle restarts rather than
+   immediately firing.
+6. User swaps KVM to hp. No ambush break.
 
-### Where it does *not* bite
+### Safety properties tested
 
-- Single-machine usage.
-- Both machines simultaneously in active keyboard use (no meeting).
-- Passive listening meetings with no keyboard activity — r16 goes idle
-  naturally, hp sees no peer activity, both pause in sync.
-- Meetings shorter than `smallEvery` — the ghost cycle doesn't have
-  time to fire.
-
-### Shape of a fix (not built)
-
-Additive on top of the current design. No rebase or API break:
-
-1. New event type `EVENT_MEETING_TRANSITION = 0x03`, payload 1 byte
-   `{0x00=ended, 0x01=started}`.
-2. `AppContext::meetingStart` / `meetingEnd` signals → wire to
-   `RemoteActivityMonitor::broadcastMeetingTransition(...)` alongside
-   the existing breakStart connect.
-3. `PeerState::inMeeting` bool.
-4. New aggregate `anyPeerInMeeting()` signal. Consumer options:
-   - `AppContext` treats it as a new `PauseReason::PeerMeeting` (cleanest,
-     reuses the existing pause machinery which also happens to reset
-     the cycle on long pauses).
-   - Or: `EffectiveIdleTime` reports "idle" whenever any peer is in a
-     meeting, effectively freezing the non-meeting peer's countdown.
-     Simpler but less semantically clean.
-5. Tests: peer-meeting-transitions-across, self-meeting-doesn't-broadcast-
-   back (feedback-loop immunity), meeting-start-then-disconnect-peer-
-   recovers-after-unreachable-window.
-
-Roughly Phase 6 in size. Would live as a Phase 14 if resumed.
-
-### User-level mitigations without code
-
-- Tray-toggle peer fusion off before a call. Requires remembering.
-- Run `autoMeetingOnApp=true` on both machines with the same meeting app
-  installed. Usually impractical because the call only happens on one.
+- Loopback drop: a MEETING packet whose `sender_uuid` matches our own
+  is ignored (`peer_self_meeting_does_not_loopback`).
+- Orthogonality: MEETING packets don't fire `peerActivityChanged`
+  (`peer_meeting_is_orthogonal_to_active_state`).
+- Idempotent transitions: duplicate MEETING_STARTED emits
+  `peerMeetingChanged` exactly once
+  (`peer_meeting_flipping_only_emits_on_transitions`).
+- Offline recovery: a peer stuck in MEETING state that goes silent for
+  `> peerUnreachableWindowSeconds` is evicted and the aggregate flips
+  false
+  (`peer_in_meeting_offline_after_unreachable_window_clears_aggregate`).
+- Passive-listen liveness: MEETING packets count toward the `tick()`
+  recency check, so a listener who sends no ACTIVITY / IDLE edges
+  isn't prematurely evicted
+  (`meeting_transition_extends_recency_for_passive_peer`).
+- Wire format: full encode/decode round-trip for both state bytes +
+  explicit drop tests on wrong payload size and out-of-range state
+  byte (test-peer-packet `round_trip_meeting_transition_*`,
+  `decode_fails_on_meeting_transition_*`).
 
 ## Not yet integrated into workstation repos
 
@@ -318,8 +330,12 @@ CI.
 
 ## Status line
 
-Feature-complete within this repo, test-covered, verified-building.
-Two gaps prevent real-world use: (1) no cross-peer meeting awareness —
-causes ambush breaks after meetings, described above; (2) not
-provisioned into the workstation repos — so even if the feature were
-perfect, it wouldn't run on any of the user's actual machines yet.
+Feature-complete within this repo (including Phase 14 cross-peer
+meeting awareness), test-covered, verified-building. The sole gap
+preventing real-world use is workstation-repo provisioning — the
+`install.sh` / `doctor.sh` edits in both `workstation-work` and
+`workstation-personal`, plus the `[peer]` section of each host's
+`SaneBreak.ini`. With Phase 14 shipped, peer-fusion is now strictly
+additive: single-machine users see byte-identical behavior, and
+multi-machine users both have combined-activity break scheduling AND
+don't get ambushed by peer meetings.
