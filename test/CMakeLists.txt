@@ -23,11 +23,16 @@ foreach(TEST_FILE ${TEST_FILES})
   add_dependencies(check "${TEST_FILE_NAME}")
 endforeach()
 
-# test-peer-packet links against sane-lib (where peer-packet lives), not sane-core
+# test-peer-packet and test-peer-secret link against sane-lib, not sane-core
 add_executable(test-peer-packet test-peer-packet.cpp)
 target_link_libraries(test-peer-packet PRIVATE Qt::Test sane-lib)
 add_test(NAME test-peer-packet COMMAND test-peer-packet)
 add_dependencies(check test-peer-packet)
+
+add_executable(test-peer-secret test-peer-secret.cpp)
+target_link_libraries(test-peer-secret PRIVATE Qt::Test sane-lib)
+add_test(NAME test-peer-secret COMMAND test-peer-secret)
+add_dependencies(check test-peer-secret)
 
 # Screenshot harness (not part of check target)
 add_executable(

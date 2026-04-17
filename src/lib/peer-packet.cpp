@@ -7,6 +7,7 @@
 #include <QCryptographicHash>
 #include <QMessageAuthenticationCode>
 #include <QtEndian>
+#include <algorithm>
 #include <cstring>
 
 namespace peer {
@@ -51,6 +52,12 @@ void appendInt64Be(QByteArray& buf, qint64 v) {
 }  // namespace
 
 QByteArray encodePacket(const Packet& p, const QByteArray& secret) {
+  // Reject oversized payloads defensively — payload_length is a 2-byte field,
+  // and truncating silently would produce a malformed packet that the decoder
+  // rejects with a confusing "payload_length mismatch" error. Return an empty
+  // QByteArray to signal the encoder-side failure to the caller.
+  if (p.payload.size() < 0 || p.payload.size() > 0xFFFF) return {};
+
   QByteArray body;
   body.reserve(kMaxPacketBytes);
 
@@ -94,6 +101,15 @@ std::optional<Packet> decodePacket(const QByteArray& bytes, const QByteArray& se
   if (bytes.size() < kMinPacketBytes || bytes.size() > kMaxPacketBytes) {
     return drop("size out of range");
   }
+
+  // Authenticate-then-parse: verify HMAC on the full body before touching any
+  // attacker-controlled fields. This bounds the pre-auth attack surface to the
+  // fixed-size bound check above and the constant-time HMAC compare below.
+  QByteArray body = bytes.left(bytes.size() - kHmacBytes);
+  QByteArray hmacField = bytes.right(kHmacBytes);
+  QByteArray expected =
+      QMessageAuthenticationCode::hash(body, secret, QCryptographicHash::Sha256);
+  if (!constantTimeEquals(hmacField, expected)) return drop("hmac mismatch");
 
   int pos = 0;
   auto readBytes = [&](int n) -> QByteArray {
@@ -165,13 +181,6 @@ std::optional<Packet> decodePacket(const QByteArray& bytes, const QByteArray& se
     }
   }
 
-  // HMAC trailer
-  QByteArray hmacField = readBytes(kHmacBytes);
-  QByteArray body = bytes.left(bytes.size() - kHmacBytes);
-  QByteArray expected =
-      QMessageAuthenticationCode::hash(body, secret, QCryptographicHash::Sha256);
-  if (!constantTimeEquals(hmacField, expected)) return drop("hmac mismatch");
-
   Packet p;
   p.senderUuid = senderUuid;
   p.hostname = QString::fromUtf8(hostnameBytes);
@@ -184,8 +193,9 @@ std::optional<Packet> decodePacket(const QByteArray& bytes, const QByteArray& se
 
 // ---- PeerReplayBuffer ------------------------------------------------------
 
-PeerReplayBuffer::PeerReplayBuffer(int capacity) : m_capacity(capacity) {
-  m_buffer.reserve(static_cast<size_t>(capacity));
+PeerReplayBuffer::PeerReplayBuffer(int capacity)
+    : m_capacity(std::max(1, capacity)) {
+  m_buffer.reserve(static_cast<size_t>(m_capacity));
 }
 
 bool PeerReplayBuffer::contains(const QByteArray& senderUuid, quint64 nonce) const {
