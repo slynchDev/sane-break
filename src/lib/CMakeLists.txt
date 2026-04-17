@@ -3,6 +3,8 @@ add_library(
   auto-start.h
   battery-status.cpp
   battery-status.h
+  effective-idle-time.cpp
+  effective-idle-time.h
   peer-packet.cpp
   peer-packet.h
   peer-secret.cpp

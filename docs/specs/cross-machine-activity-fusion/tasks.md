@@ -125,17 +125,17 @@
 
 ## Phase 5: EffectiveIdleTime facade
 
-- [ ] **5.1** `EffectiveIdleTime` class declaration
+- [x] **5.1** `EffectiveIdleTime` class declaration
   - New `src/lib/effective-idle-time.{h,cpp}`. Subclass `SystemIdleTime`. Constructor takes `SystemIdleTime* wrapped` (the real OS idle watcher) and `RemoteActivityMonitor* peers`. Forward `setWatchAccuracy`, `setMinIdleTime`, `startWatching`, `stopWatching` to `wrapped`. Override `isIdle()` to return the fused value `wrapped->isIdle() && !m_anyPeerActive` (requires task 1.5 making the base `isIdle()` virtual). This keeps synchronous callers of `app->idleTimer->isIdle()` in `AppStateBreak::enter()` (`app-states.cpp:209`) and `BreakPhaseFullScreen::tick()` (`app-states.cpp:311`) consistent with the fused signal edges. Track `bool m_anyPeerActive` updated from `peers->peerActivityChanged`.
   - _Depends: 1.5, 3.4_
   - _Spec: Requirements 2.5, 2.6_
 
-- [ ] **5.2** Fused `idleStart` / `idleEnd` emission
+- [x] **5.2** Fused `idleStart` / `idleEnd` emission
   - Cache last emitted state (`bool m_effectiveIdle = false`). On any of three triggers (wrapped idleStart, wrapped idleEnd, peerActivityChanged), recompute `effective = wrapped->isIdle() && !m_anyPeerActive`. If `effective != m_effectiveIdle`: update cache; emit `idleStart` or `idleEnd` accordingly. Never emit a duplicate edge.
   - _Depends: 5.1_
   - _Spec: Requirement 2.5_
 
-- [ ] **5.3** Unit tests for EffectiveIdleTime
+- [x] **5.3** Unit tests for EffectiveIdleTime
   - Dummy `SystemIdleTime` + stub `RemoteActivityMonitor`. Cases: local idle + no peers → idleStart fires; local idle + peer active → no idleStart; local idle + peer active transitions to peer idle → idleStart fires; local active → idleEnd regardless of peers; duplicate edges suppressed. Property 1 (active fusion monotonicity) anchors the tests.
   - _Depends: 5.2_
   - _Spec: Requirements 2.4-2.6; Property 1_

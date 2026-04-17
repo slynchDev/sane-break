@@ -39,6 +39,11 @@ target_link_libraries(test-remote-activity-monitor PRIVATE Qt::Test sane-lib)
 add_test(NAME test-remote-activity-monitor COMMAND test-remote-activity-monitor)
 add_dependencies(check test-remote-activity-monitor)
 
+add_executable(test-effective-idle-time test-effective-idle-time.cpp)
+target_link_libraries(test-effective-idle-time PRIVATE Qt::Test sane-lib)
+add_test(NAME test-effective-idle-time COMMAND test-effective-idle-time)
+add_dependencies(check test-effective-idle-time)
+
 # Screenshot harness (not part of check target)
 add_executable(
   test-screenshot test-screenshot.cpp ${CMAKE_SOURCE_DIR}/resources/index.qrc
