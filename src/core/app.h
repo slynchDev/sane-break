@@ -17,6 +17,10 @@
 #include "core/system-monitor.h"
 #include "core/timer.h"
 
+namespace peer {
+class RemoteActivityMonitor;
+}
+
 struct AppDependencies {
   SanePreferences* preferences = nullptr;
   BreakDatabase* db = nullptr;
@@ -26,6 +30,11 @@ struct AppDependencies {
   AbstractSystemMonitor* systemMonitor = nullptr;
   AbstractBreakWindows* breakWindows = nullptr;
   AbstractMeetingPrompt* meetingPrompt = nullptr;
+  // Nullable. When non-null, SaneBreakApp owns lifecycle management
+  // (start/stop on peerFusionEnabled changes, rebind on port/interface
+  // changes). AbstractApp never touches this pointer so `sane-core` stays
+  // free of any `sane-lib` link dependency.
+  peer::RemoteActivityMonitor* remoteActivityMonitor = nullptr;
 };
 
 struct TrayData {

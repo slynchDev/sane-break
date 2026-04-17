@@ -34,6 +34,10 @@ class StatsWindow : public QWidget {
   QDate m_displayedDate;
   QMap<QDate, DailyBreakStats> m_breakStatsMap;
   QMap<QDate, DailyUsageStats> m_usageStatsMap;
+  // Per-day list of (host, activeSeconds) — only populated when at least
+  // one span on that day carries a host value (i.e. after the v2 migration
+  // plus at least one openSpan call on the running app). Empty otherwise.
+  QMap<QDate, QList<HostUsageStats>> m_hostUsageMap;
 
   void refreshData();
   void navigateWeek(int delta);

@@ -189,6 +189,7 @@ void AppStatePaused::onMenuAction(AppContext* app, MenuAction action) {
 void AppStateBreak::enter(AppContext* app) {
   app->openCurrentSpan(
       "break", {{"type", app->data->breakType() == BreakType::Big ? "big" : "small"}});
+  emit app->breakStart();
   data = std::make_unique<BreaksData>(dataInit(app));
   // On focus entry break, exhaust force break exits so the exit button is hidden
   if (app->data->isFocusMode() && !app->data->focusEntryBreakDone()) {
@@ -216,6 +217,7 @@ void AppStateBreak::exit(AppContext* app) {
   if (m_currentPhase) m_currentPhase->exit(app, this);
   app->closeCurrentSpan({{"normal-exit", (data->remainingSeconds() <= 0)}});
   app->breakWindows->destroy();
+  emit app->breakEnd();
 }
 void AppStateBreak::tick(AppContext* app) { m_currentPhase->tick(app, this); }
 void AppStateBreak::onIdleStart(AppContext* app) {
@@ -380,12 +382,14 @@ void AppStateMeeting::enter(AppContext* app) {
   app->data->resetSecondsToNextBreak();
   app->idleTimer->setWatchAccuracy(5000);
   app->idleTimer->setMinIdleTime(app->preferences->pauseOnIdleFor->get() * 1000);
+  emit app->meetingStart();
 }
 
 void AppStateMeeting::exit(AppContext* app) {
   app->closeCurrentSpan();
   app->data->clearMeetingData();
   app->meetingPrompt->closeEndPrompt();
+  emit app->meetingEnd();
 }
 
 void AppStateMeeting::tick(AppContext* app) {

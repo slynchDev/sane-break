@@ -97,6 +97,14 @@ void StatsWindow::refreshData() {
   for (const auto& s : breakStats) m_breakStatsMap[s.date] = s;
   m_usageStatsMap.clear();
   for (const auto& s : usageStats) m_usageStatsMap[s.date] = s;
+  // Per-host breakdown (Phase 8): only relevant when more than one host
+  // is present on a given day, but fetched unconditionally so the map
+  // reflects DB truth — the view decides whether to render.
+  m_hostUsageMap.clear();
+  auto hostStats = m_db->queryDailyUsageByHost(m_weekStart, weekEnd);
+  for (const auto& row : hostStats) {
+    m_hostUsageMap[row.date].append(row);
+  }
 
   populateDailyBreakdown(timelines, breakStats);
   updateDayDetail(m_displayedDate);
@@ -136,6 +144,24 @@ void StatsWindow::updateDayDetail(QDate date) {
 
   DailyUsageStats usage = m_usageStatsMap.value(date);
   ui->dayUsageLabel->setArgs({formatDuration(usage.activeSeconds)});
+
+  // Per-host breakdown — render only when the day has more than one host
+  // with meaningful attribution. Single-host days would duplicate the
+  // number in the line above.
+  const QList<HostUsageStats>& hostRows = m_hostUsageMap.value(date);
+  QStringList visible;
+  for (const auto& row : hostRows) {
+    if (row.activeSeconds <= 0 || row.host.isEmpty()) continue;
+    visible << QStringLiteral("%1: %2").arg(row.host,
+                                            formatDuration(row.activeSeconds));
+  }
+  if (visible.size() >= 2) {
+    ui->dayHostBreakdownLabel->setText(visible.join(QStringLiteral(" · ")));
+    ui->dayHostBreakdownLabel->setVisible(true);
+  } else {
+    ui->dayHostBreakdownLabel->clear();
+    ui->dayHostBreakdownLabel->setVisible(false);
+  }
 }
 
 void StatsWindow::updateWeekLabel() {

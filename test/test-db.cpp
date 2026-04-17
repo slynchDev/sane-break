@@ -4,8 +4,10 @@
 
 #include <QDate>
 #include <QDateTime>
+#include <QHostInfo>
 #include <QJsonObject>
 #include <QObject>
+#include <QSignalSpy>
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QString>
@@ -279,6 +281,160 @@ class TestDb : public QObject {
     auto stats = db->queryDailyBreakStats(localDate, localDate);
     QCOMPARE(stats.size(), 1);
     QCOMPARE(stats[0].smallBreaks, 1);
+  }
+
+  // ---- Phase 8: schema migration + host column (Property 6, 11) --------
+
+  void fresh_install_is_at_user_version_2() {
+    QSqlQuery q(sqlDb);
+    QVERIFY(q.exec("PRAGMA user_version"));
+    QVERIFY(q.next());
+    QCOMPARE(q.value(0).toInt(), 2);
+  }
+
+  void fresh_install_spans_has_host_column() {
+    QSqlQuery q(sqlDb);
+    QVERIFY(q.exec("PRAGMA table_info(spans)"));
+    bool haveHost = false;
+    while (q.next()) {
+      if (q.value(1).toString() == "host") haveHost = true;
+    }
+    QVERIFY(haveHost);
+  }
+
+  void open_span_stamps_local_hostname() {
+    int id = db->openSpan("normal", {});
+    QVERIFY(id > 0);
+    QSqlQuery q(sqlDb);
+    q.prepare("SELECT host FROM spans WHERE id = ?");
+    q.addBindValue(id);
+    QVERIFY(q.exec());
+    QVERIFY(q.next());
+    QCOMPARE(q.value(0).toString(), QHostInfo::localHostName());
+  }
+
+  void migration_is_idempotent() {
+    // migrate() is called by ensureDb(); open+close+reopen must not change
+    // user_version beyond 2.
+    QSqlQuery q(sqlDb);
+    QVERIFY(q.exec("PRAGMA user_version"));
+    QVERIFY(q.next());
+    QCOMPARE(q.value(0).toInt(), 2);
+    // A second event triggers another ensureDb call on the same db.
+    db->logEvent("test::again");
+    QVERIFY(q.exec("PRAGMA user_version"));
+    QVERIFY(q.next());
+    QCOMPARE(q.value(0).toInt(), 2);
+  }
+
+  void upgrade_from_v0_adds_host_and_backfills() {
+    // Simulate an older DB in a fresh connection: create legacy-shaped
+    // spans + events tables with user_version=0 and a row missing host.
+    const QString conn = "test-db-legacy";
+    {
+      auto legacy = QSqlDatabase::addDatabase("QSQLITE", conn);
+      legacy.setDatabaseName(":memory:");
+      QVERIFY(legacy.open());
+      QSqlQuery q(legacy);
+      QVERIFY(q.exec("CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, "
+                     "data TEXT, created_at TIMESTAMP)"));
+      QVERIFY(q.exec("CREATE TABLE spans (id INTEGER PRIMARY KEY, type TEXT, "
+                     "started_at TIMESTAMP, ended_at TIMESTAMP, data TEXT)"));
+      QVERIFY(q.exec("INSERT INTO spans (type, started_at, data) VALUES "
+                     "('normal', '2024-01-01 12:00:00', '{}')"));
+      QVERIFY(q.exec("PRAGMA user_version = 0"));
+
+      BreakDatabase legacyDb(legacy);
+      legacyDb.logEvent("trigger::migrate");  // triggers ensureDb→migrate
+
+      QSqlQuery check(legacy);
+      QVERIFY(check.exec("PRAGMA user_version"));
+      QVERIFY(check.next());
+      QCOMPARE(check.value(0).toInt(), 2);
+
+      QVERIFY(check.exec("SELECT host FROM spans"));
+      QVERIFY(check.next());
+      QCOMPARE(check.value(0).toString(), QHostInfo::localHostName());
+    }
+    QSqlDatabase::removeDatabase(conn);
+  }
+
+  // Property 11 — migration failure containment. We force migrate() to
+  // fail by pre-populating a pathological schema: a spans table that
+  // already has a conflicting column type, so the runtime UPDATE during
+  // backfill hits a real SQL error. isReadOnly() flips true and all
+  // write paths silently no-op while reads still succeed.
+  void migration_failure_flips_read_only_and_skips_writes() {
+    const QString conn = "test-db-broken";
+    {
+      auto broken = QSqlDatabase::addDatabase("QSQLITE", conn);
+      broken.setDatabaseName(":memory:");
+      QVERIFY(broken.open());
+      QSqlQuery q(broken);
+      // Legacy-shaped spans with a bogus CHECK that rejects the runtime
+      // backfill value. Forces the UPDATE inside migrate() to fail.
+      QVERIFY(q.exec("CREATE TABLE events (id INTEGER PRIMARY KEY, type TEXT, "
+                     "data TEXT, created_at TIMESTAMP)"));
+      QVERIFY(q.exec("CREATE TABLE spans (id INTEGER PRIMARY KEY, type TEXT, "
+                     "started_at TIMESTAMP, ended_at TIMESTAMP, data TEXT, "
+                     "host TEXT CHECK (host = '__never_matches__'))"));
+      QVERIFY(q.exec("INSERT INTO spans (type, started_at, data) VALUES "
+                     "('normal', '2024-01-01 12:00:00', '{}')"));
+      QVERIFY(q.exec("PRAGMA user_version = 0"));
+
+      BreakDatabase brokenDb(broken);
+      QSignalSpy failSpy(&brokenDb, &BreakDatabase::initializationFailed);
+      brokenDb.logEvent("trigger::migrate");  // ensureDb → migrate → FAIL
+      QVERIFY(brokenDb.isReadOnly());
+      QVERIFY(failSpy.count() >= 1);
+
+      // Further writes must be silent no-ops — no crash, no exception.
+      const int before = [&broken]() {
+        QSqlQuery check(broken);
+        check.exec("SELECT COUNT(*) FROM spans");
+        return check.next() ? check.value(0).toInt() : -1;
+      }();
+      (void)brokenDb.logEvent("after::readonly");
+      int idAttempt = brokenDb.openSpan("normal");
+      QCOMPARE(idAttempt, -1);
+      brokenDb.closeSpan(42);  // must not throw
+
+      QSqlQuery check(broken);
+      QVERIFY(check.exec("SELECT COUNT(*) FROM spans"));
+      QVERIFY(check.next());
+      QCOMPARE(check.value(0).toInt(), before);  // unchanged
+    }
+    QSqlDatabase::removeDatabase(conn);
+  }
+
+  void per_host_usage_query_splits_by_host() {
+    // Two 'normal' spans on the same day with different hosts.
+    QSqlQuery q(sqlDb);
+    q.prepare("INSERT INTO spans (type, started_at, ended_at, data, host) "
+              "VALUES (?, ?, ?, ?, ?)");
+    q.addBindValue("normal");
+    q.addBindValue("2024-06-15 10:00:00");
+    q.addBindValue("2024-06-15 10:05:00");
+    q.addBindValue("{}");
+    q.addBindValue("r16");
+    QVERIFY(q.exec());
+    q.addBindValue("normal");
+    q.addBindValue("2024-06-15 11:00:00");
+    q.addBindValue("2024-06-15 11:02:00");
+    q.addBindValue("{}");
+    q.addBindValue("peer-hp");
+    QVERIFY(q.exec());
+
+    QDateTime utcDay(QDate(2024, 6, 15), QTime(10, 30, 0), QTimeZone::UTC);
+    QDate day = utcDay.toLocalTime().date();
+    auto rows = db->queryDailyUsageByHost(day, day);
+    int r16Secs = 0, hpSecs = 0;
+    for (const auto& row : rows) {
+      if (row.host == "r16") r16Secs = row.activeSeconds;
+      if (row.host == "peer-hp") hpSecs = row.activeSeconds;
+    }
+    QCOMPARE(r16Secs, 300);
+    QCOMPARE(hpSecs, 120);
   }
 };
 

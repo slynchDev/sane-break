@@ -1,0 +1,471 @@
+# Cross-Machine Activity Fusion - Implementation Tasks
+
+> Auto-generated from spec.md. Each task maps to a spec section.
+> Mark tasks: `[ ]` pending, `[~]` in progress, `[x]` done, `[-]` skipped, `[!]` blocked.
+
+---
+
+## Phase 1: Foundations
+
+- [x] **1.1** Add `Qt6::Network` to build
+  - Add `find_package(Qt6 COMPONENTS Network REQUIRED)` and link `Qt6::Network` to the `sane-lib` target in `src/lib/CMakeLists.txt`. Required for `QUdpSocket`. `QMessageAuthenticationCode`, `QHostInfo`, and `QUuid` are in Qt Core — no additional linkage needed.
+  - _Spec: Constraints_
+
+- [x] **1.2** Declare peer preferences in `SanePreferences`
+  - Add six `Setting<T>*` fields to `src/core/preferences.h` with exact INI keys and defaults: `peerFusionEnabled` (bool `peer/fusion-enabled`, default `false`), `peerListenPort` (int `peer/listen-port`, default `45454`, range 1024-65535), `peerActiveWindowSeconds` (int `peer/active-window-seconds`, default `15`, range 5-120), `peerUnreachableWindowSeconds` (int `peer/unreachable-window-seconds`, default `60`, range 15-600), `peerHeartbeatIntervalSeconds` (int `peer/heartbeat-interval-seconds`, default `5`, range 1-30), `peerBroadcastInterfaces` (QStringList `peer/broadcast-interfaces`, default empty). Instantiate in the `SanePreferences` constructor body in `src/core/preferences.cpp`. Range validation happens in the preferences UI layer, not here.
+  - _Spec: Requirement 7.1_
+
+- [x] **1.3** Define wire-format constants and `Packet` struct
+  - Create `src/lib/peer-packet.h` with: `static constexpr char kMagic[4] = {'S', 'B', 'P', 'A'};` (raw bytes — do NOT use the `uint32_t kMagic = 'SBPA'` multi-character-literal form; its value is implementation-defined per the C++ standard and naive integer serialization would be host-endian-dependent, which would make little-endian and big-endian peers unable to talk to each other). Add `kVersion = 0x01`, `kKeyIdV1 = 0x00`, `kMaxPacketBytes = 512`, `kMaxHostnameBytes = 63`, `kMinPacketBytes` (header bytes), event-type enum values (`ACTIVITY = 0x01`, `IDLE_TRANSITION = 0x02`), and state enum values (`STATE_IDLE = 0x00`, `STATE_ACTIVE = 0x01`). Define a `Packet` struct with fields for `senderUuid`, `hostname`, `timestamp`, `nonce`, `eventType`, and a `QByteArray payload`. No encode/decode logic yet — that lives in task 2.2/2.3.
+  - _Spec: Requirements 4.1-4.8_
+
+- [x] **1.4** Add `breakStart()` / `breakEnd()` signals to `AppContext`
+  - Add two Qt signals `void breakStart();` and `void breakEnd();` to `AppContext` in `src/core/app-states.h`. Emit `breakStart` at the top of `AppStateBreak::enter()` (right after `openCurrentSpan("break", ...)`) and `breakEnd` at the end of `AppStateBreak::exit()` (right after `closeCurrentSpan()`). These signals let `RemoteActivityMonitor` reset per-peer attribution counters atomically on break transitions, without coupling `AppStateBreak` to peer logic.
+  - _Spec: Requirement 5.1_
+
+- [x] **1.5** Make `SystemIdleTime::isIdle()` virtual
+  - Change `bool isIdle()` in `src/core/idle-time.h:35` from a non-virtual inline getter to `virtual bool isIdle() { return m_isIdle; }`. No behavior change for existing callers. Required so `EffectiveIdleTime` (task 5.1) can override `isIdle()` to return the fused `localIdle && !anyPeerActive` value consumed synchronously by `AppStateBreak::enter()` and `BreakPhaseFullScreen::tick()`.
+  - _Spec: Requirement 2.5_
+
+---
+
+## Phase 2: Crypto and serialization
+
+- [x] **2.1** Secret file loader with permissions auto-repair
+  - New file `src/lib/peer-secret.{h,cpp}` exposing `QByteArray loadPeerSecret(QString* outError)`. Resolve path from env `SANE_BREAK_PEER_SECRET_FILE`, default `~/.secrets.d/sane-break-peer`. Read file, strip optional trailing newline, require exactly 64 hex characters, hex-decode to a 32-byte `QByteArray`. On permissions wider than `0600`: attempt `QFile::setPermissions(ReadOwner|WriteOwner)`; if that fails, populate `outError` and return empty. On missing/unreadable/malformed: populate `outError` with a single user-visible message naming the resolved path and return empty. Caller treats empty result as "fusion disabled, single-machine mode".
+  - _Spec: Requirements 3.1, 3.5, 3.6_
+
+- [x] **2.2** Packet encoder
+  - Add `QByteArray encodePacket(const Packet& p, const QByteArray& secret)` in `src/lib/peer-packet.cpp`. Serialize fields in order: magic(4) | version(1) | key_id(1) | sender_uuid(16) | hostname_len(1) | hostname(0..63 UTF-8) | timestamp(8 BE) | nonce(8) | event_type(1) | payload_length(2 BE) | payload(variable). Then append `QMessageAuthenticationCode::hash(body, secret, QCryptographicHash::Sha256)` (32 bytes). All multi-byte integers big-endian. Caller stamps `key_id = kKeyIdV1 = 0x00`.
+  - _Depends: 1.3, 2.1_
+  - _Spec: Requirements 3.1, 4.1-4.8, 4.13_
+
+- [x] **2.3** Packet decoder with validation
+  - Add `std::optional<Packet> decodePacket(const QByteArray& bytes, const QByteArray& secret, QString* whyDropped)` in `src/lib/peer-packet.cpp`. Validate in order and drop silently (populate `whyDropped` at debug level only) on: total size out of `[kMinPacketBytes, kMaxPacketBytes]`, magic mismatch, version != 0x01, key_id != 0x00, hostname_len > 63, total size implied by payload_length disagrees with buffer length, unknown event_type. Additionally validate event-type-specific payload shape per Req 4.7/4.8: if `event_type == ACTIVITY` require `payload_length == 4`; if `event_type == IDLE_TRANSITION` require `payload_length == 1` AND the payload byte ∈ {0x00, 0x01}. Verify HMAC with `QMessageAuthenticationCode` + constant-time byte compare. Timestamp-window and replay checks are NOT decoder responsibilities — they live in the caller (task 3.3) against a live clock. Return the decoded `Packet` only if all checks pass.
+  - _Depends: 1.3, 2.1_
+  - _Spec: Requirements 3.2, 4.1, 4.4, 4.7-4.13_
+
+- [x] **2.4** Replay ring buffer
+  - Add `PeerReplayBuffer` (fixed-capacity 256 entries of `{QByteArray sender_uuid, uint64_t nonce}`) in `src/lib/peer-packet.{h,cpp}`. Methods: `bool contains(const QByteArray& uuid, uint64_t nonce) const`, `void insert(...)`. Oldest-out eviction. Caller also enforces the timestamp window check (`|now - ts| > 30s` → drop; `now + 5s < ts` → drop) before consulting the buffer.
+  - _Spec: Requirements 3.3, 3.4_
+
+- [x] **2.5** Unit tests for packet crypto and replay buffer
+  - Add `test/test-peer-packet.cpp` and register in `test/CMakeLists.txt`. Test cases: encode then decode round-trips cleanly; decode fails for magic mismatch, wrong version byte, `key_id=0x01`, `hostname_len=100`, truncated buffer, `payload_length` overflowing buffer, unknown event_type, ACTIVITY with `payload_length=3` or `=5`, IDLE_TRANSITION with `payload_length=0` or `=2` or state byte `0x02`/`0xff`, tampered HMAC. Replay buffer: first insert wins, duplicate rejected, 257th insert evicts the oldest. Timestamp-window tests (too old, too new) belong in task 3.6, not here — the decoder does not own timestamp validation. Property 2 / Property 9 / Property 10 anchor these tests.
+  - _Depends: 2.2, 2.3, 2.4_
+  - _Spec: Requirements 3.2, 3.4, 4.7, 4.8, 4.9-4.12; Properties 2, 10_
+
+---
+
+## Phase 3: RemoteActivityMonitor core (peer state, sockets)
+
+- [x] **3.1** `RemoteActivityMonitor` class skeleton
+  - New `src/lib/remote-activity-monitor.{h,cpp}`. Subclass `QObject`. Constructor signature `RemoteActivityMonitor(SanePreferences* prefs, SystemIdleTime* localIdle, QObject* parent = nullptr)` — `localIdle` MUST be the raw local `SystemIdleTime`, NOT an `EffectiveIdleTime` facade; wiring the facade here creates a peer-feedback loop (peer active → facade reports active → our heartbeat re-broadcasts → peer sees us active forever). Owns a `QByteArray m_secret`, `QByteArray m_senderUuid` (fresh `QUuid::createUuid().toRfc4122()` per process), `PeerReplayBuffer m_replay`, and a map `QHash<QByteArray, PeerState> m_peers` where key is sender_uuid. Define `enum class PeerLastState { Active, Idle }` and `struct PeerState { QString hostname; QDateTime lastSeenActive; QDateTime lastSeenIdle; PeerLastState lastState; int activeSecondsSinceLastBreak; }`. `lastState` is the normalized state (Active/Idle) — distinct from the raw `event_type` byte — so the three packet shapes (ACTIVITY, IDLE_TRANSITION{active}, IDLE_TRANSITION{idle}) all collapse cleanly into this enum at update time (task 3.3). Expose signals: `void peerActivityChanged(bool anyPeerActive);`. Provide `void start()` / `void stop()` lifecycle methods. `stop()` SHALL clear `m_peers`, cancel the offline-cleanup timer (task 3.5) and the heartbeat timer (task 4.1), close any open sockets (task 3.2), and — if the cached aggregate was true — emit `peerActivityChanged(false)` so `EffectiveIdleTime` drops back to pass-through semantics.
+  - _Depends: 1.2, 1.3, 2.1, 2.4_
+  - _Spec: Requirements 2.1-2.2, 3.4, 7.3_
+
+- [x] **3.2** UDP socket setup with interface allowlist
+  - Store per-interface tuples `struct InterfaceSocket { QUdpSocket* socket; QHostAddress localAddr; QHostAddress subnetBroadcast; int interfaceIndex; }` in a `QList<InterfaceSocket>`. Also maintain `QSet<int> m_allowedInterfaceIndexes` for ingress filtering (task 3.3). In `RemoteActivityMonitor::start()`, for each interface name in `preferences->peerBroadcastInterfaces->get()`:
+    1. `QNetworkInterface iface = QNetworkInterface::interfaceFromName(name);` — if invalid or down, log a user-visible warning and skip this entry (partial failure is OK; other interfaces still work).
+    2. Pick the first IPv4 `QNetworkAddressEntry` from `iface.addressEntries()`; skip if none. Store `entry.ip()` as `localAddr`, `entry.broadcast()` as `subnetBroadcast` (e.g., `192.168.1.255` for a `192.168.1.0/24` subnet), and `iface.index()` as `interfaceIndex`; insert the index into `m_allowedInterfaceIndexes`. `QHostAddress::Broadcast` (`255.255.255.255`) is NOT used on egress — Linux routes it via the default route regardless of socket binding, which would leak packets onto whichever interface matches the default route, defeating the allowlist.
+    3. Create a `QUdpSocket` and `bind(QHostAddress::AnyIPv4, peerListenPort, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint)`. Binding to `Any` is required on Linux to receive packets addressed to `255.255.255.255` or the subnet-directed broadcast; binding to `localAddr` would silently drop those packets on most kernels. Note: `AnyIPv4` means the socket receives broadcasts arriving on every NIC; the allowlist is enforced on ingress inside task 3.3 via `QNetworkDatagram::interfaceIndex()` matched against `m_allowedInterfaceIndexes`.
+    4. Connect `readyRead` to `onDatagramReady()` (task 3.3).
+  - If the allowlist is empty, `start()` is a no-op. If every interface fails to bind, log the cumulative failure and leave the list empty (graceful degradation per Requirement 11.4).
+  - _Depends: 3.1_
+  - _Spec: Requirements 1.5-1.6, 2.1, 11.4_
+
+- [x] **3.3** Datagram dispatch: receive → interface filter → decode → verify → update peer
+  - Implement `onDatagramReady()` using `QObject::sender()` to identify which socket fired, then loop `while (sock->hasPendingDatagrams())` calling `QNetworkDatagram dg = sock->receiveDatagram()` (not `readDatagram`, which discards the arrival-interface metadata). Per Req 2.1 ingress filtering: if `dg.interfaceIndex()` is not in `m_allowedInterfaceIndexes` (task 3.2), drop silently — a packet arriving on a non-allowlisted NIC (corporate VPN, guest Wi-Fi, tenant bridge) must not mutate peer state even if its HMAC is valid. Then `decodePacket(dg.data(), m_secret)`; drop silently on failure. If `packet.senderUuid == m_senderUuid`, drop (self-loopback per Req 1.7). Timestamp-window check (`|now - ts| > 30s` OR `ts > now + 5s`) + replay-buffer check; drop on either failure. Insert into replay buffer. Look up or create `PeerState` for `packet.senderUuid`; update `hostname` (first-seen) and normalize the event into `PeerLastState`:
+    - `event_type == ACTIVITY` → `lastSeenActive = now; lastState = Active`
+    - `event_type == IDLE_TRANSITION` AND `payload state byte == 0x01` → `lastSeenActive = now; lastState = Active`
+    - `event_type == IDLE_TRANSITION` AND `payload state byte == 0x00` → `lastSeenIdle = now; lastState = Idle`
+  - Call `recomputeAnyPeerActive()` to emit `peerActivityChanged` if the aggregate transitioned.
+  - _Depends: 2.3, 2.4, 3.1, 3.2_
+  - _Spec: Requirements 1.7, 2.1-2.4, 3.2-3.4_
+
+- [x] **3.4** `anyPeerActive` aggregation logic
+  - Private `bool computeAnyPeerActive() const`: iterate `m_peers`, return true iff at least one peer has `lastSeenActive` within `peerActiveWindowSeconds` AND `lastState == PeerLastState::Active`. `recomputeAnyPeerActive()` computes the new value, compares to cached previous, and emits `peerActivityChanged(newValue)` on transition only.
+  - _Depends: 3.1_
+  - _Spec: Requirements 2.3, 2.4_
+
+- [x] **3.5** Peer offline cleanup + periodic aggregate recompute
+  - QTimer with 1-second interval started in `start()` (the same 1 s cadence as the attribution tick in 6.1 — implementations MAY share one timer). On every tick: (a) iterate `m_peers`, remove entries whose `max(lastSeenActive, lastSeenIdle)` is older than `peerUnreachableWindowSeconds`; (b) unconditionally call `recomputeAnyPeerActive()`. The unconditional recompute bounds staleness of the `peerActiveWindowSeconds` → idle transition to 1 second; without it, a peer that simply stops broadcasting would keep the aggregate stuck at `true` until it crosses the `peerUnreachableWindowSeconds` threshold (up to 45 s stale with default settings, blocking local `idleStart` emission).
+  - _Depends: 3.1, 3.4_
+  - _Spec: Requirements 2.3, 2.4, 2.8, 11.2_
+
+- [x] **3.6** Unit tests for peer state dispatch
+  - Add tests in `test/test-remote-activity-monitor.cpp`: valid ACTIVITY / IDLE_TRANSITION{active} / IDLE_TRANSITION{idle} each update peer state and `lastState` correctly; ACTIVITY → IDLE_TRANSITION{active} → IDLE_TRANSITION{idle} sequence drives the aggregate through Active→Active→Idle transitions at the right edges; self-packet drops; duplicate nonce drops; timestamp too old (`ts = now - 31s`) drops; timestamp too new (`ts = now + 6s`) drops; ingress interface filter drops packets whose `QNetworkDatagram::interfaceIndex()` is not in `m_allowedInterfaceIndexes`; `peerActivityChanged` fires only on true→false or false→true transitions; silent peer's aggregate flips within 1 s of crossing `peerActiveWindowSeconds`; peer offline timeout removes and flips aggregate. Property 1 (active fusion monotonicity) and Property 4 (self-traffic immunity) anchor specific tests here.
+  - _Depends: 3.3, 3.4, 3.5_
+  - _Spec: Requirements 1.7, 2.1-2.4, 2.8, 3.3; Properties 1, 4_
+
+---
+
+## Phase 4: RemoteActivityMonitor outbound
+
+- [x] **4.1** Heartbeat timer + ACTIVITY emission
+  - In `RemoteActivityMonitor::start()`, start a `QTimer` with interval `peerHeartbeatIntervalSeconds * 1000`. On timeout, if the local `SystemIdleTime` reports `!isIdle()`, build an ACTIVITY packet (payload = `event_count` accumulated since last emit; implementation may simply set to `1` if no tick counter exists), encode via `encodePacket`, and for each `InterfaceSocket` tuple from task 3.2 call `socket->writeDatagram(bytes, subnetBroadcast, peerListenPort)`. Using the per-interface subnet-directed broadcast (e.g., `192.168.1.255`) ensures the kernel routes the packet via that specific interface; `QHostAddress::Broadcast` (`255.255.255.255`) would route via the default route regardless of socket binding and defeat the interface allowlist. Reset the counter after emit. No emission when `peerFusionEnabled` is false OR `peerBroadcastInterfaces` empty.
+  - _Depends: 3.2, 2.2_
+  - _Spec: Requirements 1.1, 1.5, 1.6_
+
+- [x] **4.2** IDLE_TRANSITION emission on local idle edges
+  - Connect the raw local `SystemIdleTime` (injected via 3.1's ctor) `idleStart` → send IDLE_TRANSITION{state=idle}; connect `idleEnd` → send IDLE_TRANSITION{state=active}. Reuses the same encode + per-interface subnet-broadcast path as 4.1. Must be the raw timer, not the `EffectiveIdleTime` facade (per 3.1 feedback-loop note).
+  - _Depends: 4.1_
+  - _Spec: Requirements 1.3, 1.4_
+
+- [x] **4.3** Send-failure backoff logging
+  - When `writeDatagram` returns -1 for an interface, log at debug level at most once per interface per 60 seconds. Do not disable the socket; keep retrying on subsequent ticks.
+  - _Depends: 4.1_
+  - _Spec: Requirement 11.5_
+
+- [x] **4.4** Unit tests for outbound emission
+  - Tests: heartbeat fires at T-second cadence while non-idle; no emission when idle locally; idleStart/idleEnd edges emit exactly one IDLE_TRANSITION each with the right state byte; self-packets round-trip are ignored by the local receiver (regression for Property 4). Verify packet field values via `decodePacket`.
+  - _Depends: 4.1, 4.2_
+  - _Spec: Requirements 1.1, 1.3, 1.4, 1.7; Property 4_
+
+---
+
+## Phase 5: EffectiveIdleTime facade
+
+- [x] **5.1** `EffectiveIdleTime` class declaration
+  - New `src/lib/effective-idle-time.{h,cpp}`. Subclass `SystemIdleTime`. Constructor takes `SystemIdleTime* wrapped` (the real OS idle watcher) and `RemoteActivityMonitor* peers`. Forward `setWatchAccuracy`, `setMinIdleTime`, `startWatching`, `stopWatching` to `wrapped`. Override `isIdle()` to return the fused value `wrapped->isIdle() && !m_anyPeerActive` (requires task 1.5 making the base `isIdle()` virtual). This keeps synchronous callers of `app->idleTimer->isIdle()` in `AppStateBreak::enter()` (`app-states.cpp:209`) and `BreakPhaseFullScreen::tick()` (`app-states.cpp:311`) consistent with the fused signal edges. Track `bool m_anyPeerActive` updated from `peers->peerActivityChanged`.
+  - _Depends: 1.5, 3.4_
+  - _Spec: Requirements 2.5, 2.6_
+
+- [x] **5.2** Fused `idleStart` / `idleEnd` emission
+  - Cache last emitted state (`bool m_effectiveIdle = false`). On any of three triggers (wrapped idleStart, wrapped idleEnd, peerActivityChanged), recompute `effective = wrapped->isIdle() && !m_anyPeerActive`. If `effective != m_effectiveIdle`: update cache; emit `idleStart` or `idleEnd` accordingly. Never emit a duplicate edge.
+  - _Depends: 5.1_
+  - _Spec: Requirement 2.5_
+
+- [x] **5.3** Unit tests for EffectiveIdleTime
+  - Dummy `SystemIdleTime` + stub `RemoteActivityMonitor`. Cases: local idle + no peers → idleStart fires; local idle + peer active → no idleStart; local idle + peer active transitions to peer idle → idleStart fires; local active → idleEnd regardless of peers; duplicate edges suppressed. Property 1 (active fusion monotonicity) anchors the tests.
+  - _Depends: 5.2_
+  - _Spec: Requirements 2.4-2.6; Property 1_
+
+---
+
+## Phase 6: Per-peer attribution counters
+
+- [x] **6.1** `activeSecondsSinceLastBreak` counters
+  - `RemoteActivityMonitor` gains `int m_localActiveSecondsSinceLastBreak = 0` and each `PeerState` already carries `activeSecondsSinceLastBreak`. The existing 1-second `tick()` (shared with the offline-cleanup / aggregate-recompute path per 3.5) now advances these counters in the same pass: for each peer whose state matches the `computeAnyPeerActive` predicate, `++activeSecondsSinceLastBreak`; if `m_localIdle` reports non-idle, `++m_localActiveSecondsSinceLastBreak`.
+  - _Depends: 3.1, 3.4_
+  - _Spec: Requirement 5.2_
+
+- [x] **6.2** Reset counters on `AppContext::breakStart`
+  - `RemoteActivityMonitor::resetAttribution()` zeros the local counter and every `PeerState::activeSecondsSinceLastBreak` atomically on the GUI thread (no locking required — all updates happen in the Qt event loop thread).
+  - _Depends: 1.4, 6.1_
+  - _Spec: Requirements 5.1, 5.2_
+
+- [x] **6.3** `activityBreakdown()` method
+  - Returns `ActivityBreakdown { QList<HostActivity> hosts; int totalActiveSeconds; }` where `HostActivity { QString label; int activeSeconds; int sharePercent; }`. Local row always comes first (label = `QHostInfo::localHostName()`), then one row per peer (label = peer hostname, falling back to first 8 hex chars of sender_uuid when the hostname is absent). `sharePercent` is rounded to the nearest integer — rows are not guaranteed to sum to exactly 100, matching typical tooltip formatting expectations. Reads in-memory only, no I/O.
+  - _Depends: 6.1_
+  - _Spec: Requirements 5.2, 5.6_
+
+- [x] **6.4** Unit tests for attribution
+  - `test/test-remote-activity-monitor.cpp` gains: `local_counter_advances_while_not_idle`, `local_counter_stalls_while_idle`, `peer_counter_advances_within_active_window`, `peer_counter_stalls_after_active_window_expires`, `reset_attribution_zeroes_all_counters`, `breakdown_shares_sum_close_to_total` (Property 5 pin), `breakdown_uses_uuid_prefix_when_hostname_missing`, `breakdown_share_percents_reflect_ratio`.
+  - _Depends: 6.2, 6.3_
+  - _Spec: Requirements 5.1-5.3, 5.6; Property 5_
+
+- [x] **6.5** Peer status accessor for live indicator
+  - Already implemented in Phase 3 as `QList<PeerStatus> peerStatuses(const QDateTime& now) const`. The method computes `isActive` at call-time against the supplied `now` so stats display does not race with the tick cadence.
+  - _Depends: 3.1, 3.3_
+  - _Spec: Requirement 7.2_
+
+---
+
+## Phase 7: Tray peer-breakdown tooltip
+
+- [x] **7.1** Peer-breakdown line composer
+  - `formatPeerBreakdown()` lives in the anonymous namespace at the top of `src/app/tray.cpp`. It consumes `peer::ActivityBreakdown` and returns strings like `peer-hp 68% · r16 32% · 47m total`. Empty-string guards: `fusionEnabled=false`, `totalActiveSeconds<=0`, fewer than two hosts with non-zero attribution. When `totalActiveSeconds < 60` the suffix degrades to `Ns total`.
+  - _Depends: 6.3_
+  - _Spec: Requirements 5.3-5.5_
+
+- [x] **7.2** 2-second throttle scoped to peer line
+  - `StatusTrayWindow` gains `m_cachedPeerLine` and `m_peerLineTimer` (QElapsedTimer). `update()` rebuilds the peer line only when `!m_peerLineTimer.isValid() || m_peerLineTimer.elapsed() >= 2000`; otherwise it reuses the cache. Countdown portion of the tooltip re-formats every call as before.
+  - _Depends: 7.1_
+  - _Spec: Requirement 5.4; Constraints_
+
+- [x] **7.3** Wire RemoteActivityMonitor into tray construction
+  - `StatusTrayWindow::setRemoteActivityMonitor(peer::RemoteActivityMonitor*)` accepts a nullable pointer. `SaneBreakApp::SaneBreakApp` calls `tray->setRemoteActivityMonitor(m_ram)` right after constructing the tray. When null (DummyApp path or fusion disabled) the cached peer line stays empty and `update()` appends nothing.
+  - _Depends: 7.1, 7.2_
+  - _Spec: Requirements 5.3, 5.5_
+
+- [ ] **7.4** Manual tooltip verification (deferred)
+  - Two-machine manual check left for Phase 13.10's manual KVM test procedure. Automated coverage of the formatter lives adjacent to the formatter code.
+  - _Depends: 7.3, 9.1_
+  - _Spec: Requirement 5_
+
+---
+
+## Phase 8: DB schema migration + host attribution (parallel to 2-7)
+
+- [x] **8.1** Migration runner keyed on `PRAGMA user_version`
+  - `BreakDatabase::migrate()` reads `PRAGMA user_version`. If `< 2`: `m_db.transaction()`, `ALTER TABLE spans ADD COLUMN host TEXT` (treating "duplicate column" errors as success since fresh installs already carry the column), `UPDATE spans SET host = ? WHERE host IS NULL` bound with `QHostInfo::localHostName()`, `PRAGMA user_version = 2`, then `commit()`. Any failure rolls back and returns the error. Idempotent when `user_version >= 2`.
+  - _Spec: Requirement 6.1; Constraints_
+
+- [x] **8.2** Fresh-install schema stamps `user_version = 2`
+  - The initial `CREATE TABLE IF NOT EXISTS spans` in `ensureDb()` now includes `host TEXT`. `ensureDb()` calls `migrate()` after the CREATE, which stamps `user_version = 2` on its first pass regardless of whether the table was brand-new or pre-existing. Property 6 idempotence holds.
+  - _Spec: Requirement 6.2; Property 6_
+
+- [x] **8.3** Stamp `host` on every opened span
+  - `BreakDatabase::openSpan()` now binds `QHostInfo::localHostName()` to the `host` column on every INSERT (both timed and untimed variants). No behavior change for existing callers.
+  - _Depends: 8.1, 8.2_
+  - _Spec: Requirement 6.3_
+
+- [x] **8.4** Graceful degradation on migration failure
+  - `ensureDb()` sets `m_readOnlyMode = true` and emits `initializationFailed(QString)` on migration failure. `logEvent` / `openSpan` / `closeSpan` now early-return when `m_readOnlyMode` is set, preserving scheduler + UI behavior. Next launch retries migration because the flag is not persisted. `m_initialized` guards re-entry so `ensureDb()` runs the migration exactly once per `BreakDatabase` instance even when the caller pre-opens the connection (tests).
+  - _Depends: 8.1, 8.3_
+  - _Spec: Requirements 6.6, 6.7_
+
+- [x] **8.5** Per-host aggregation query for stats
+  - `QList<HostUsageStats> BreakDatabase::queryDailyUsageByHost(QDate from, QDate to)` aggregates `(date, host) → activeSeconds` over `normal`/`meeting` spans, reusing `splitSpanIntoDays` for midnight-crossing correctness. `COALESCE(host, '')` guards against the rare pre-migration rows so they aggregate under an empty host bucket rather than being dropped by `GROUP BY`.
+  - _Depends: 8.1_
+  - _Spec: Requirement 6.5_
+
+- [x] **8.6** Stats window per-host breakdown row
+  - `stats-window.ui` gains `dayHostBreakdownLabel` below the existing `dayUsageLabel`. `StatsWindow::updateDayDetail` populates it as `host1: HH:MM:SS · host2: HH:MM:SS · …` only when two or more hosts have non-zero attribution for the selected day; otherwise the label hides so single-host days stay uncluttered.
+  - _Depends: 8.5_
+  - _Spec: Requirement 6.5_
+
+- [x] **8.7** DB migration unit tests
+  - `test/test-db.cpp` gains: `fresh_install_is_at_user_version_2`, `fresh_install_spans_has_host_column`, `open_span_stamps_local_hostname`, `migration_is_idempotent`, `upgrade_from_v0_adds_host_and_backfills` (legacy-shaped tables → migrate → user_version=2 + backfilled host), `per_host_usage_query_splits_by_host`. Read-only-on-failure coverage is deferred to Phase 13.9's property test, where a simulated read-only filesystem exercises the full degradation path.
+  - _Depends: 8.2, 8.3, 8.4_
+  - _Spec: Requirements 6.1, 6.2, 6.6; Properties 6, 11_
+
+---
+
+## Phase 9: AppDependencies wiring + runtime toggle
+
+- [x] **9.1** Construct `RemoteActivityMonitor` in `SaneBreakApp::create()`
+  - In `src/app/app.cpp` (`SaneBreakApp::create()`), construct the raw idle timer via `createIdleTimer(parent)` and store it in a local `SystemIdleTime* rawIdleTimer`. Then `RemoteActivityMonitor* ram = new RemoteActivityMonitor(preferences, rawIdleTimer, parent)` — passing the raw timer (not the facade built in 9.2) to prevent the peer-feedback loop documented in task 3.1. Add a `RemoteActivityMonitor*` field to `AppDependencies` in `src/core/app.h`. Populate it in the deps struct. Call `ram->start()` after deps are constructed if `preferences->peerFusionEnabled->get()` is true.
+  - Implementation note: the `ram*` field in `AppDependencies` is forward-declared (`namespace peer { class RemoteActivityMonitor; }`) so that `sane-core` does not acquire a link-time dependency on `sane-lib`. All peer-specific wiring lives in `SaneBreakApp` (which is part of `sane-gui` and already links both libraries).
+  - _Depends: Phase 3 complete, Phase 4 complete, 1.2_
+  - _Spec: Requirement 7.7; Constraints_
+
+- [x] **9.2** Wire `EffectiveIdleTime` into `AppDependencies::idleTimer`
+  - `EffectiveIdleTime` is always constructed (wrapping `rawIdleTimer` and `ram`) and always assigned to `AppDependencies::idleTimer`, regardless of `peerFusionEnabled`. When fusion is disabled (ram stopped), the facade degrades to pass-through because `m_anyPeerActive` stays `false`. This keeps the dependency graph fixed and satisfies 9.3's "no second AppDependencies code path" requirement. `rawIdleTimer` is referenced by BOTH `ram` (as its local idle source) and `EffectiveIdleTime` (as its wrapped timer) — single raw instance, two consumers.
+  - _Depends: 9.1, 5.2_
+  - _Spec: Requirements 2.7, 7.3_
+
+- [x] **9.3** Runtime toggle of `peerFusionEnabled`
+  - `SaneBreakApp` connects `preferences->peerFusionEnabled->changed` to `onPeerFusionToggled()`, which calls `ram->start()` or `ram->stop()` based on the new value. `stop()`'s contract (clear `m_peers`, emit `peerActivityChanged(false)`) causes `EffectiveIdleTime` to fall through to pass-through within the same event-loop turn — no restart required, no second `AppDependencies` code path.
+  - _Depends: 9.1, 9.2, 3.1_
+  - _Spec: Requirement 7.7_
+
+- [x] **9.4** Runtime rebind on port / interface change
+  - `SaneBreakApp` connects both `peerListenPort` and `peerBroadcastInterfaces` `changed` signals to `onPeerBindingChanged()`, which calls `ram->stop()` then `ram->start()`. If `ram->isRunning()` is false afterward, the handler reverts both preferences to their last known-good snapshot (captured after each successful start) and re-calls `start()`. A guard flag prevents recursion when the revert fires `changed` again. Tray-level warning surfacing is deferred to Phase 10 (preferences UI / live indicator); a `qWarning` is logged in the interim.
+  - _Depends: 9.1, 9.3_
+  - _Spec: Requirement 7.8_
+
+- [x] **9.5** Wire break-transition signals
+  - Unblocked once Phase 6 landed `resetAttribution()`. The wiring is a single `connect(this, &AppContext::breakStart, m_ram, &peer::RemoteActivityMonitor::resetAttribution)` call in the `if (m_ram)` block of `SaneBreakApp::SaneBreakApp`. Because the `breakStart` signal is emitted from `AppStateBreak::enter()` (Phase 1 task 1.4), every break-entry path — normal tick expiry, `BigBreakNow`, `EndMeetingBreakNow`, focus-mode entry — triggers it automatically.
+  - _Depends: 9.1, 6.2, 1.4_
+  - _Spec: Requirements 5.1, 5.2_
+
+- [x] **9.6** Integration tests for wiring
+  - `test/test-app.cpp` gains `peer_fusion_disabled_by_default` (pins the Property 7 default) and `peer_fusion_runtime_toggle_null_ram_safe` (verifies the handler short-circuits when no RAM is wired, matching `DummyApp`). `test/test-effective-idle-time.cpp` gains `ram_stop_after_peer_active_restores_local_idle` and `ram_stop_with_no_peers_is_no_op_for_facade` — these cover the mid-session toggle path (ram stop → facade pass-through within one event-loop turn) that the SaneBreakApp handler drives. Full-stack SaneBreakApp toggle coverage is deferred to Phase 13's property-test suite.
+  - _Depends: 9.3, 9.5_
+  - _Spec: Requirements 7.7, 11.1, 11.3; Property 7_
+
+---
+
+## Phase 10: Preferences UI (parallel to 3-9 after 1.2)
+
+- [x] **10.1** Add "Peer fusion" section to `src/app/pref-window.ui`
+  - New `QGroupBox peerFusionGroup` appended to the Pause page. Contains the six controls (`peerFusionEnabledCheck`, `peerListenPortBox`, `peerActiveWindowBox`, `peerUnreachableWindowBox`, `peerHeartbeatIntervalBox`, `peerBroadcastInterfacesEdit`), the read-only resolved-secret-path label `peerSecretPathLabel`, the metadata-leak notice `peerMetadataNoticeLabel`, and the live-indicator `peerStatusList`. SpinBox ranges match Req 7.1 (1024-65535, 5-120, 15-600, 1-30).
+  - _Depends: 1.2_
+  - _Spec: Requirements 7.2, 7.5_
+
+- [x] **10.2** Wire preference controllers for Peer fusion section
+  - `pref-window.cpp` registers `PrefController` specializations for the six controls under the existing `PrefGroup::Pause`. The secret path label text is seeded from `peer::resolvedPeerSecretPath()` (which honors `$SANE_BREAK_PEER_SECRET_FILE`). A `syncPeerGroupEnabled` lambda dims dependent controls when the master checkbox is off, mirroring how the big-break group drives its own dependents.
+  - _Depends: 10.1_
+  - _Spec: Requirement 7.2_
+
+- [x] **10.3** Live peer indicator in preferences window
+  - `PreferenceWindow::refreshPeerStatusList()` pulls `peerStatuses(now)` and formats each entry as `{hostLabel} — active 3s ago` / `{hostLabel} — idle 12s ago` / `{hostLabel} — … (never seen)` when a peer has been discovered but no ACTIVITY/IDLE packet has landed yet. A 2 s `QTimer` started in the ctor triggers the refresh; when `m_ram` is null (DummyApp / fusion off) the list clears and stays empty. `SaneBreakApp` injects `m_ram` into the pref window via `setRemoteActivityMonitor()`.
+  - _Depends: 10.2, 6.5_
+  - _Spec: Requirement 7.2_
+
+---
+
+## Phase 11: workstation-work provisioning (parallel — different repo)
+
+- [ ] **11.1** `install.sh` generates the peer secret if absent
+  - In `~/git/workstation-work/install.sh`, before the sane-break build block: `mkdir -p ~/.secrets.d && chmod 0700 ~/.secrets.d`. If `~/.secrets.d/sane-break-peer` does not exist, generate inside a subshell-scoped umask so the file never exists at a wider-than-0600 mode (do NOT use `> file && chmod 0600 file`, which leaves the file world-readable for a brief race window): `(umask 177 && openssl rand -hex 32 > ~/.secrets.d/sane-break-peer)`. Print a numbered instruction block ending with the race-free remote-copy command: `ssh user@otherhost 'install -m 600 /dev/null ~/.secrets.d/sane-break-peer' && scp -p ~/.secrets.d/sane-break-peer user@otherhost:~/.secrets.d/sane-break-peer` (pre-creates the remote file at 0600, then `scp -p` preserves mode on transfer).
+  - _Spec: Requirement 8.1_
+
+- [ ] **11.2** `install.sh` repairs wider-than-0600 permissions
+  - If `~/.secrets.d/sane-break-peer` exists with mode wider than `0600`: `chmod 0600` and echo a warning.
+  - _Depends: 11.1_
+  - _Spec: Requirement 8.2_
+
+- [ ] **11.3** `scripts/doctor.sh` asserts the secret file
+  - After the existing `compare_file` / `check_command` blocks in `~/git/workstation-work/scripts/doctor.sh`, add assertions: file exists; is a regular file owned by `$USER`; mode is `0600`; content is exactly 64 hex characters (optional trailing newline). On any failure, print `Run scripts/ws deploy && install.sh to (re)generate the peer secret.`.
+  - _Spec: Requirement 8.3_
+
+- [ ] **11.4** `configs/sane-break/SaneBreak.ini` adds `[peer]` section
+  - Append to `~/git/workstation-work/configs/sane-break/SaneBreak.ini`:
+    ```
+    [peer]
+    fusion-enabled=true
+    broadcast-interfaces=<iface>
+    ```
+    where `<iface>` is the host's chosen broadcast interface (r16's LAN NIC). Deployed to `~/.config/SaneBreak/SaneBreak.ini` automatically via the existing `scripts/ws deploy` flow.
+  - _Spec: Requirement 8.5_
+
+- [ ] **11.5** Verify `ws deploy` carries the new keys end-to-end
+  - Manual: on r16, `scripts/ws deploy --pull`, confirm `~/.config/SaneBreak/SaneBreak.ini` contains the `[peer]` section with the expected keys. Run `scripts/ws doctor` — all assertions pass.
+  - _Depends: 11.1, 11.3, 11.4_
+  - _Spec: Requirement 10.1, 10.3_
+
+- [ ] **11.6** Verify `ws deploy` does NOT touch the secret file
+  - Manual negative test guarding Reqs 10.2 and 10.4. Capture baseline: `BEFORE=$(stat --format='%Y %i %s' ~/.secrets.d/sane-break-peer) && BEFORE_SHA=$(sha256sum ~/.secrets.d/sane-break-peer | awk '{print $1}')`. Run `scripts/ws deploy --pull` (including any install.sh subcommand path). Re-capture: `AFTER=$(stat --format='%Y %i %s' ~/.secrets.d/sane-break-peer) && AFTER_SHA=$(sha256sum ~/.secrets.d/sane-break-peer | awk '{print $1}')`. Assert `BEFORE == AFTER` AND `BEFORE_SHA == AFTER_SHA` — mtime, inode, size, and content all unchanged. Any difference means a deploy code path accidentally touched the secret; investigate and fix before shipping.
+  - _Depends: 11.1, 11.5_
+  - _Spec: Requirements 10.2, 10.4_
+
+---
+
+## Phase 12: workstation-personal provisioning (parallel — different repo)
+
+- [ ] **12.1** Switch `install.sh` clone to `slynchDev/sane-break`
+  - In `~/git/workstation-personal/install.sh`, change the `git clone https://github.com/AllanChain/sane-break.git` line to `git clone -b meeting-aware https://github.com/slynchDev/sane-break.git`. Mirror any branch-pinning logic used by the work repo.
+  - _Spec: Requirement 9.1_
+
+- [ ] **12.2** Unify checkout path with workstation-work
+  - Pick one path (`~/git/sane-break` to match work, or `~/src/sane-break` — the work repo uses `~/git/sane-break`, so standardize on that). Update the clone target, the "Building sane-break" `cd` line, the rebuild-skip `if [ -d ~/... ]` check, and any `scripts/doctor.sh` references in `~/git/workstation-personal/` consistently in this single task.
+  - _Depends: 12.1_
+  - _Spec: Requirement 9.2_
+
+- [ ] **12.3** Mirror 11.1 secret generation in `workstation-personal/install.sh`
+  - Same subshell-scoped `(umask 177 && openssl rand -hex 32 > ~/.secrets.d/sane-break-peer)` generation plus the `ssh ... install -m 600 ... && scp -p` copy instruction as task 11.1. Do not use the naive `> file && chmod 0600 file` pattern — it creates a race window where the secret is briefly world-readable.
+  - _Spec: Requirement 9.3_
+
+- [ ] **12.4** Mirror 11.2 permissions repair
+  - Same `chmod 0600` + warning behavior.
+  - _Depends: 12.3_
+  - _Spec: Requirement 9.4_
+
+- [ ] **12.5** Mirror 11.3 `scripts/doctor.sh` assertion
+  - Same four-part assertion.
+  - _Spec: Requirement 9.5_
+
+- [ ] **12.6** `configs/sane-break/SaneBreak.ini` `[peer]` section
+  - Same `fusion-enabled=true` + host-specific `broadcast-interfaces` value for hp/x220 profiles.
+  - _Spec: Requirement 9.6_
+
+- [ ] **12.7** Verify `ws deploy` does NOT touch the secret file (workstation-personal)
+  - Mirror of task 11.6 for the personal repo: capture `stat`+`sha256sum` of `~/.secrets.d/sane-break-peer` before and after `scripts/ws deploy --pull` on hp or x220; assert byte-identical and mtime-identical.
+  - _Depends: 12.3, 12.5_
+  - _Spec: Requirements 10.2, 10.4_
+
+---
+
+## Phase 13: Property-test integration suite
+
+- [x] **13.1** Active fusion monotonicity (Property 1)
+  - Covered by `test/test-effective-idle-time.cpp`: `local_idle_peer_active_suppresses_idleStart`, `peer_idle_while_local_idle_triggers_idleStart`, and `peer_active_while_local_idle_fires_idleEnd` together pin the monotonicity invariant that the facade never emits `idleStart` while any peer is active.
+  - _Depends: 9.6, 5.3_
+  - _Spec: Property 1; Requirements 2.3-2.5_
+
+- [x] **13.2** Spoof rejection (Property 2)
+  - Covered by `test/test-peer-packet.cpp` (magic/version/key_id/tampered-HMAC/truncated/overflow cases) and `test/test-remote-activity-monitor.cpp::tampered_packet_is_dropped`. Invalid packets exit `decodePacket()` before any peer state mutation, leaving the replay buffer, peer map, and aggregate untouched.
+  - _Depends: 2.5, 3.6_
+  - _Spec: Property 2; Requirements 3.2-3.4, 4.4, 4.13_
+
+- [x] **13.3** Secret-file safety (Property 3)
+  - Covered by `test/test-peer-secret.cpp`: missing file, empty file, 63 / 65 / non-hex content, permission auto-repair, env override. In all failure branches `loadPeerSecret` returns empty and the caller (`RemoteActivityMonitor::start`) aborts before binding sockets, so peer fusion degrades to pass-through.
+  - _Depends: 2.1, 9.6_
+  - _Spec: Property 3; Requirements 3.5, 3.6_
+
+- [x] **13.4** Self-traffic immunity (Property 4)
+  - Covered by `test/test-remote-activity-monitor.cpp::self_emission_roundtrip_is_ignored`: a locally-built ACTIVITY packet injected through `handleReceivedDatagram` produces zero peer entries and zero aggregate transitions.
+  - _Depends: 3.6, 4.4_
+  - _Spec: Property 4; Requirement 1.7_
+
+- [x] **13.5** Attribution fidelity (Property 5)
+  - Covered by `test/test-remote-activity-monitor.cpp::breakdown_shares_sum_close_to_total` and surrounding counter tests. Sum of per-host `activeSeconds` equals `totalActiveSeconds` exactly (no floating-point allocation), and no host exceeds the tick count.
+  - _Depends: 6.4_
+  - _Spec: Property 5; Requirements 5.1-5.3_
+
+- [x] **13.6** Single-machine regression safety (Property 7)
+  - Covered by `test/test-app.cpp::peer_fusion_disabled_by_default` plus the whole existing DummyApp suite running with `peerFusionEnabled=false` and a null `RemoteActivityMonitor` — every pre-fusion assertion still holds byte-identical.
+  - _Depends: 9.6_
+  - _Spec: Property 7; Requirement 11.1_
+
+- [x] **13.7** Replay bound (Property 9)
+  - Covered by `test/test-peer-packet.cpp` (replay-buffer contains/insert/evict tests) and `test/test-remote-activity-monitor.cpp::duplicate_nonce_is_dropped` / `old_timestamp_is_dropped` / `future_timestamp_is_dropped`. Both the 30 s window and nonce dedup paths exit before touching peer state.
+  - _Depends: 2.5_
+  - _Spec: Property 9; Requirements 3.3, 3.4_
+
+- [x] **13.8** Wire-format field bounding (Property 10)
+  - Covered by `test/test-peer-packet.cpp` size / hostname_len / payload_length / event-type / key_id rejection branches. Every invalid-shape permutation drops silently; no peer state / replay-buffer mutation.
+  - _Depends: 2.5_
+  - _Spec: Property 10; Requirements 4.4, 4.10-4.12_
+
+- [x] **13.9** Migration failure containment (Property 11)
+  - `test/test-db.cpp::migration_failure_flips_read_only_and_skips_writes` triggers a real migrate failure by pre-seeding a `spans.host TEXT CHECK` constraint that no runtime value can satisfy, then verifies `isReadOnly()` flips true, the `initializationFailed` signal fires, and subsequent `logEvent`/`openSpan`/`closeSpan` calls silently no-op without mutating the table.
+  - _Depends: 8.7_
+  - _Spec: Property 11; Requirements 6.6, 6.7_
+
+- [x] **13.10** Manual KVM-switch end-to-end
+  - Procedure documented in `test/manual-kvm-switch.md`. Two-machine run with KVM toggling mid-cycle, confirms single break, tooltip split, and `peerUnreachableWindowSeconds` drop-off.
+  - _Depends: 11.5, 12.6_
+  - _Spec: Introduction; Requirements 2, 5_
+
+- [-] **13.11** Provisioning determinism (Property 8)
+  - Skipped in this repo — the matrix lives in the workstation-work and workstation-personal repos, which own the `scripts/ws doctor` implementation targeted by Property 8. Tasks 11.3 and 12.5 (in those repos) carry the assertion logic; this manual matrix is executed from there.
+  - _Depends: 11.3, 12.5_
+  - _Spec: Property 8; Requirements 8.1, 8.3, 9.3, 9.5_
+
+---
+
+## Phase 14: Cross-peer meeting awareness
+
+Closes the ambush-break scenario that STATUS.md called out as the branch's
+marquee known gap. Additive on top of phases 1–13; no rebase or API break.
+
+- [x] **14.1** Wire format: EVENT_MEETING_TRANSITION + MeetingState enum
+  - Added `EVENT_MEETING_TRANSITION = 0x03` to `peer::EventType` and a new `peer::MeetingState` enum with `MEETING_ENDED = 0x00` / `MEETING_STARTED = 0x01`. Decoder extended to accept the new event type, require 1-byte payload, and reject out-of-range state bytes silently.
+  - _Depends: 2.2_
+  - _Spec: Requirement 12.1_
+
+- [x] **14.2** RemoteActivityMonitor: builder + broadcast slots
+  - `buildMeetingTransitionPacket(now, state)` mirroring `buildIdleTransitionPacket`. `broadcastMeetingStart()` / `broadcastMeetingEnd()` public slots that emit on every allowlisted interface.
+  - _Depends: 14.1, 4.4_
+  - _Spec: Requirement 12.3_
+
+- [x] **14.3** PeerState: inMeeting + lastSeenMeetingTransition
+  - New fields, updated by the receive handler on EVENT_MEETING_TRANSITION. `lastSeenActive` / `lastSeenIdle` / `lastState` intentionally untouched by MEETING packets to preserve the existing fused-idle semantics.
+  - _Depends: 14.1_
+  - _Spec: Requirements 12.4_
+
+- [x] **14.4** Aggregate: anyPeerInMeeting + peerMeetingChanged signal
+  - `computeAnyPeerInMeeting()` OR-reduces `PeerState::inMeeting` over the current peer map. `recomputeAnyPeerActive()` now also recomputes the meeting aggregate and emits `peerMeetingChanged(bool)` on transitions.
+  - _Depends: 14.3_
+  - _Spec: Requirement 12.5_
+
+- [x] **14.5** tick() eviction recency + stop() teardown
+  - `tick()` considers `lastSeenMeetingTransition` alongside `lastSeenActive` / `lastSeenIdle` when computing liveness — so a passive-listening peer that sends only MEETING packets isn't prematurely evicted. `stop()` clears the meeting aggregate and emits `peerMeetingChanged(false)` if it was true.
+  - _Depends: 14.4_
+  - _Spec: Requirements 12.7, 12.8_
+
+- [x] **14.6** AppContext signals + AppStateMeeting wiring
+  - `meetingStart()` / `meetingEnd()` signals on `AppContext`. `AppStateMeeting::enter()` emits `meetingStart`, `::exit()` emits `meetingEnd`. Mirrors the existing breakStart/End pattern so every meeting-entry path (audio detection, manual toggle, `autoMeetingOnApp=true`) is covered by a single connect site.
+  - _Depends: 14.2_
+  - _Spec: Requirement 12.2_
+
+- [x] **14.7** PauseReason::PeerMeeting consumer
+  - `PauseReason::PeerMeeting = 1 << 5` in `flags.h`. `SaneBreakApp` connects `peerMeetingChanged` → `onPauseRequest` / `onResumeRequest` with that reason. Reuses the existing `AppStatePaused` machinery including its long-pause cycle-reset semantics.
+  - _Depends: 14.4, 14.6_
+  - _Spec: Requirement 12.6_
+
+- [x] **14.8** Property tests (8 RAM cases + 3 packet cases)
+  - `test-remote-activity-monitor.cpp`: started/ended/orthogonal/idempotent/loopback/offline/passive-liveness/build-shape.
+  - `test-peer-packet.cpp`: round-trip started + ended, payload-size rejection, state-byte rejection.
+  - All 11 pass deterministically without QEventLoop / sleep.
+  - _Depends: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7_
+  - _Spec: Requirement 12 (all criteria)_
+
+- [x] **14.9** Spec + STATUS sync
+  - spec.md: new Requirement 12 with 9 acceptance criteria.
+  - STATUS.md: Known-gap section replaced with "Phase 14 (shipped)" describing what it does, the previously-broken scenario now fixed, and the safety properties under test. Status-line updated — the sole remaining gap is workstation-repo provisioning.
+  - _Depends: 14.1–14.8_
+  - _Spec: Requirement 12; STATUS_
