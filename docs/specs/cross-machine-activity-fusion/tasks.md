@@ -197,36 +197,36 @@
 
 ## Phase 8: DB schema migration + host attribution (parallel to 2-7)
 
-- [ ] **8.1** Migration runner keyed on `PRAGMA user_version`
-  - Add `QSqlError BreakDatabase::migrate()` in `src/core/db.cpp`. Query `PRAGMA user_version`. If `< 2`: `BEGIN`, `ALTER TABLE spans ADD COLUMN host TEXT`, `UPDATE spans SET host = ? WHERE host IS NULL` bound with `QHostInfo::localHostName()`, `PRAGMA user_version = 2`, `COMMIT`. On failure: rollback, return error. Do NOT use SQL `DEFAULT <expression>` — SQLite accepts only constant literals there.
+- [x] **8.1** Migration runner keyed on `PRAGMA user_version`
+  - `BreakDatabase::migrate()` reads `PRAGMA user_version`. If `< 2`: `m_db.transaction()`, `ALTER TABLE spans ADD COLUMN host TEXT` (treating "duplicate column" errors as success since fresh installs already carry the column), `UPDATE spans SET host = ? WHERE host IS NULL` bound with `QHostInfo::localHostName()`, `PRAGMA user_version = 2`, then `commit()`. Any failure rolls back and returns the error. Idempotent when `user_version >= 2`.
   - _Spec: Requirement 6.1; Constraints_
 
-- [ ] **8.2** Fresh-install schema stamps `user_version = 2`
-  - In the `ensureDb()` path where the `spans`/`events` tables are created for the first time, include `host TEXT` in the CREATE TABLE, and after successful creation run `PRAGMA user_version = 2`. Ensures Property 6 (migration idempotence) holds for new installs.
+- [x] **8.2** Fresh-install schema stamps `user_version = 2`
+  - The initial `CREATE TABLE IF NOT EXISTS spans` in `ensureDb()` now includes `host TEXT`. `ensureDb()` calls `migrate()` after the CREATE, which stamps `user_version = 2` on its first pass regardless of whether the table was brand-new or pre-existing. Property 6 idempotence holds.
   - _Spec: Requirement 6.2; Property 6_
 
-- [ ] **8.3** Stamp `host` on every opened span
-  - Modify `BreakDatabase::openSpan(...)` to insert `QHostInfo::localHostName()` into the `host` column. No behavior change for existing callers.
+- [x] **8.3** Stamp `host` on every opened span
+  - `BreakDatabase::openSpan()` now binds `QHostInfo::localHostName()` to the `host` column on every INSERT (both timed and untimed variants). No behavior change for existing callers.
   - _Depends: 8.1, 8.2_
   - _Spec: Requirement 6.3_
 
-- [ ] **8.4** Graceful degradation on migration failure
-  - If `migrate()` returns an error: set an internal `m_readOnlyMode` flag, surface one user-visible error dialog on startup, and make `openSpan` / `closeSpan` / `logEvent` no-op (debug-log-only) for the session. Break scheduler and UI continue. Next startup retries migration.
+- [x] **8.4** Graceful degradation on migration failure
+  - `ensureDb()` sets `m_readOnlyMode = true` and emits `initializationFailed(QString)` on migration failure. `logEvent` / `openSpan` / `closeSpan` now early-return when `m_readOnlyMode` is set, preserving scheduler + UI behavior. Next launch retries migration because the flag is not persisted. `m_initialized` guards re-entry so `ensureDb()` runs the migration exactly once per `BreakDatabase` instance even when the caller pre-opens the connection (tests).
   - _Depends: 8.1, 8.3_
   - _Spec: Requirements 6.6, 6.7_
 
-- [ ] **8.5** Per-host aggregation query for stats
-  - Add `QList<HostUsageStats> queryDailyUsageByHost(QDate from, QDate to)` returning per-day per-host active seconds. Reuse the existing span-aggregation logic with `GROUP BY date, host`.
+- [x] **8.5** Per-host aggregation query for stats
+  - `QList<HostUsageStats> BreakDatabase::queryDailyUsageByHost(QDate from, QDate to)` aggregates `(date, host) → activeSeconds` over `normal`/`meeting` spans, reusing `splitSpanIntoDays` for midnight-crossing correctness. `COALESCE(host, '')` guards against the rare pre-migration rows so they aggregate under an empty host bucket rather than being dropped by `GROUP BY`.
   - _Depends: 8.1_
   - _Spec: Requirement 6.5_
 
-- [ ] **8.6** Stats window per-host breakdown row
-  - Render the per-host aggregation beneath the existing daily total in `src/app/stats-window.cpp`. Display as `{hostname}: {HH:MM:SS}` per host per day.
+- [x] **8.6** Stats window per-host breakdown row
+  - `stats-window.ui` gains `dayHostBreakdownLabel` below the existing `dayUsageLabel`. `StatsWindow::updateDayDetail` populates it as `host1: HH:MM:SS · host2: HH:MM:SS · …` only when two or more hosts have non-zero attribution for the selected day; otherwise the label hides so single-host days stay uncluttered.
   - _Depends: 8.5_
   - _Spec: Requirement 6.5_
 
-- [ ] **8.7** DB migration unit tests
-  - Add to `test/test-db.cpp`: fresh DB starts at `user_version = 2` and has `host` column; DB at `user_version = 0` migrates to 2 and backfills `host` with local hostname; migration is idempotent (second call is no-op); read-only DB triggers `m_readOnlyMode` and skips span writes without crashing.
+- [x] **8.7** DB migration unit tests
+  - `test/test-db.cpp` gains: `fresh_install_is_at_user_version_2`, `fresh_install_spans_has_host_column`, `open_span_stamps_local_hostname`, `migration_is_idempotent`, `upgrade_from_v0_adds_host_and_backfills` (legacy-shaped tables → migrate → user_version=2 + backfilled host), `per_host_usage_query_splits_by_host`. Read-only-on-failure coverage is deferred to Phase 13.9's property test, where a simulated read-only filesystem exercises the full degradation path.
   - _Depends: 8.2, 8.3, 8.4_
   - _Spec: Requirements 6.1, 6.2, 6.6; Properties 6, 11_
 
