@@ -31,25 +31,25 @@
 
 ## Phase 2: Crypto and serialization
 
-- [ ] **2.1** Secret file loader with permissions auto-repair
+- [x] **2.1** Secret file loader with permissions auto-repair
   - New file `src/lib/peer-secret.{h,cpp}` exposing `QByteArray loadPeerSecret(QString* outError)`. Resolve path from env `SANE_BREAK_PEER_SECRET_FILE`, default `~/.secrets/sane-break-peer`. Read file, strip optional trailing newline, require exactly 64 hex characters, hex-decode to a 32-byte `QByteArray`. On permissions wider than `0600`: attempt `QFile::setPermissions(ReadOwner|WriteOwner)`; if that fails, populate `outError` and return empty. On missing/unreadable/malformed: populate `outError` with a single user-visible message naming the resolved path and return empty. Caller treats empty result as "fusion disabled, single-machine mode".
   - _Spec: Requirements 3.1, 3.5, 3.6_
 
-- [ ] **2.2** Packet encoder
+- [x] **2.2** Packet encoder
   - Add `QByteArray encodePacket(const Packet& p, const QByteArray& secret)` in `src/lib/peer-packet.cpp`. Serialize fields in order: magic(4) | version(1) | key_id(1) | sender_uuid(16) | hostname_len(1) | hostname(0..63 UTF-8) | timestamp(8 BE) | nonce(8) | event_type(1) | payload_length(2 BE) | payload(variable). Then append `QMessageAuthenticationCode::hash(body, secret, QCryptographicHash::Sha256)` (32 bytes). All multi-byte integers big-endian. Caller stamps `key_id = kKeyIdV1 = 0x00`.
   - _Depends: 1.3, 2.1_
   - _Spec: Requirements 3.1, 4.1-4.8, 4.13_
 
-- [ ] **2.3** Packet decoder with validation
+- [x] **2.3** Packet decoder with validation
   - Add `std::optional<Packet> decodePacket(const QByteArray& bytes, const QByteArray& secret, QString* whyDropped)` in `src/lib/peer-packet.cpp`. Validate in order and drop silently (populate `whyDropped` at debug level only) on: total size out of `[kMinPacketBytes, kMaxPacketBytes]`, magic mismatch, version != 0x01, key_id != 0x00, hostname_len > 63, total size implied by payload_length disagrees with buffer length, unknown event_type. Additionally validate event-type-specific payload shape per Req 4.7/4.8: if `event_type == ACTIVITY` require `payload_length == 4`; if `event_type == IDLE_TRANSITION` require `payload_length == 1` AND the payload byte ∈ {0x00, 0x01}. Verify HMAC with `QMessageAuthenticationCode` + constant-time byte compare. Timestamp-window and replay checks are NOT decoder responsibilities — they live in the caller (task 3.3) against a live clock. Return the decoded `Packet` only if all checks pass.
   - _Depends: 1.3, 2.1_
   - _Spec: Requirements 3.2, 4.1, 4.4, 4.7-4.13_
 
-- [ ] **2.4** Replay ring buffer
+- [x] **2.4** Replay ring buffer
   - Add `PeerReplayBuffer` (fixed-capacity 256 entries of `{QByteArray sender_uuid, uint64_t nonce}`) in `src/lib/peer-packet.{h,cpp}`. Methods: `bool contains(const QByteArray& uuid, uint64_t nonce) const`, `void insert(...)`. Oldest-out eviction. Caller also enforces the timestamp window check (`|now - ts| > 30s` → drop; `now + 5s < ts` → drop) before consulting the buffer.
   - _Spec: Requirements 3.3, 3.4_
 
-- [ ] **2.5** Unit tests for packet crypto and replay buffer
+- [x] **2.5** Unit tests for packet crypto and replay buffer
   - Add `test/test-peer-packet.cpp` and register in `test/CMakeLists.txt`. Test cases: encode then decode round-trips cleanly; decode fails for magic mismatch, wrong version byte, `key_id=0x01`, `hostname_len=100`, truncated buffer, `payload_length` overflowing buffer, unknown event_type, ACTIVITY with `payload_length=3` or `=5`, IDLE_TRANSITION with `payload_length=0` or `=2` or state byte `0x02`/`0xff`, tampered HMAC. Replay buffer: first insert wins, duplicate rejected, 257th insert evicts the oldest. Timestamp-window tests (too old, too new) belong in task 3.6, not here — the decoder does not own timestamp validation. Property 2 / Property 9 / Property 10 anchor these tests.
   - _Depends: 2.2, 2.3, 2.4_
   - _Spec: Requirements 3.2, 3.4, 4.7, 4.8, 4.9-4.12; Properties 2, 10_

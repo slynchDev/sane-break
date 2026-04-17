@@ -8,6 +8,8 @@
 #include <QString>
 #include <array>
 #include <cstdint>
+#include <optional>
+#include <vector>
 
 namespace peer {
 
@@ -40,12 +42,49 @@ enum State : uint8_t {
 };
 
 struct Packet {
-  QByteArray senderUuid;  // 16 bytes (RFC4122)
-  QString hostname;       // up to 63 UTF-8 bytes
-  qint64 timestamp;       // Unix seconds
-  quint64 nonce;          // random 8 bytes
-  uint8_t eventType;      // one of EventType
-  QByteArray payload;     // event-type-specific
+  QByteArray senderUuid;   // 16 bytes (RFC4122)
+  QString hostname;        // up to 63 UTF-8 bytes
+  qint64 timestamp = 0;    // Unix seconds
+  quint64 nonce = 0;       // random 8 bytes
+  uint8_t eventType = 0;   // one of EventType
+  QByteArray payload;      // event-type-specific
+};
+
+// Serialize `p` with the provided 32-byte HMAC-SHA256 secret.
+// Always stamps `kKeyIdV1 = 0x00`. Returns the full datagram including
+// HMAC trailer. The payload is written as-is; callers are responsible
+// for matching event-type-specific payload shapes (task 2.2).
+QByteArray encodePacket(const Packet& p, const QByteArray& secret);
+
+// Decode + verify a received datagram. On any validation failure (size,
+// magic, version, key_id, hostname_len, payload_length mismatch, unknown
+// event_type, event-type-specific payload shape, HMAC), returns nullopt
+// and populates `whyDropped` at debug level. Timestamp and replay checks
+// are NOT done here — they live in the caller against a live clock.
+std::optional<Packet> decodePacket(const QByteArray& bytes,
+                                   const QByteArray& secret,
+                                   QString* whyDropped = nullptr);
+
+// Fixed-capacity ring buffer of (sender_uuid, nonce) pairs for replay
+// protection. Oldest-out eviction. 256 entries fits the expected 2–8 host
+// working set with bursty headroom.
+class PeerReplayBuffer {
+ public:
+  explicit PeerReplayBuffer(int capacity = 256);
+  bool contains(const QByteArray& senderUuid, quint64 nonce) const;
+  void insert(const QByteArray& senderUuid, quint64 nonce);
+  int size() const { return m_size; }
+  int capacity() const { return m_capacity; }
+
+ private:
+  struct Entry {
+    QByteArray senderUuid;
+    quint64 nonce = 0;
+  };
+  std::vector<Entry> m_buffer;
+  int m_capacity;
+  int m_nextIndex = 0;
+  int m_size = 0;
 };
 
 }  // namespace peer

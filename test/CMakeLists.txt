@@ -23,6 +23,12 @@ foreach(TEST_FILE ${TEST_FILES})
   add_dependencies(check "${TEST_FILE_NAME}")
 endforeach()
 
+# test-peer-packet links against sane-lib (where peer-packet lives), not sane-core
+add_executable(test-peer-packet test-peer-packet.cpp)
+target_link_libraries(test-peer-packet PRIVATE Qt::Test sane-lib)
+add_test(NAME test-peer-packet COMMAND test-peer-packet)
+add_dependencies(check test-peer-packet)
+
 # Screenshot harness (not part of check target)
 add_executable(
   test-screenshot test-screenshot.cpp ${CMAKE_SOURCE_DIR}/resources/index.qrc

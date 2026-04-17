@@ -3,7 +3,10 @@ add_library(
   auto-start.h
   battery-status.cpp
   battery-status.h
+  peer-packet.cpp
   peer-packet.h
+  peer-secret.cpp
+  peer-secret.h
   program-monitor.cpp
   program-monitor.h
   screen-lock.h
