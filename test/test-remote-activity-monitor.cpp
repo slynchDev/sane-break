@@ -76,6 +76,20 @@ QByteArray idleBytes(const QByteArray& peerUuid, const QString& hostname,
   return peer::encodePacket(p, secret);
 }
 
+// Phase 14 — MEETING_TRANSITION packet helper.
+QByteArray meetingBytes(const QByteArray& peerUuid, const QString& hostname,
+                        qint64 timestampSecs, quint64 nonce, uint8_t state,
+                        const QByteArray& secret) {
+  peer::Packet p;
+  p.senderUuid = peerUuid;
+  p.hostname = hostname;
+  p.timestamp = timestampSecs;
+  p.nonce = nonce;
+  p.eventType = peer::EVENT_MEETING_TRANSITION;
+  p.payload = QByteArray(1, static_cast<char>(state));
+  return peer::encodePacket(p, secret);
+}
+
 }  // namespace
 
 class TestRemoteActivityMonitor : public QObject {
@@ -586,6 +600,166 @@ class TestRemoteActivityMonitor : public QObject {
     QVERIFY(breakdown.totalActiveSeconds > 0);
     for (const peer::HostActivity& row : breakdown.hosts) {
       QVERIFY(row.sharePercent >= 0 && row.sharePercent <= 100);
+    }
+  }
+
+  // --- Phase 14: cross-peer meeting awareness --------------------------------
+
+  void peer_meeting_started_sets_in_meeting_and_emits_signal() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QByteArray peerUuid = makeUuid(0x77);
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    QSignalSpy spy(ram.get(), &peer::RemoteActivityMonitor::peerMeetingChanged);
+    ram->handleReceivedDatagram(
+        meetingBytes(peerUuid, "r16", now.toSecsSinceEpoch(), 1,
+                     peer::MEETING_STARTED, makeSecret()),
+        3, now);
+
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.first().first().toBool(), true);
+    QVERIFY(ram->anyPeerInMeeting());
+  }
+
+  void peer_meeting_ended_clears_flag_and_emits() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QByteArray peerUuid = makeUuid(0x77);
+    QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    // Start in meeting.
+    ram->handleReceivedDatagram(
+        meetingBytes(peerUuid, "r16", now.toSecsSinceEpoch(), 1,
+                     peer::MEETING_STARTED, makeSecret()),
+        3, now);
+    QVERIFY(ram->anyPeerInMeeting());
+
+    QSignalSpy spy(ram.get(), &peer::RemoteActivityMonitor::peerMeetingChanged);
+    now = now.addSecs(5);
+    ram->handleReceivedDatagram(
+        meetingBytes(peerUuid, "r16", now.toSecsSinceEpoch(), 2,
+                     peer::MEETING_ENDED, makeSecret()),
+        3, now);
+
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.first().first().toBool(), false);
+    QVERIFY(!ram->anyPeerInMeeting());
+  }
+
+  void peer_meeting_is_orthogonal_to_active_state() {
+    // Req 12: meeting state must not mutate lastSeenActive / lastState, so
+    // EffectiveIdleTime's fused-idle semantics are unaffected by a peer's
+    // quiet-listening-in-meeting periods.
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QByteArray peerUuid = makeUuid(0x77);
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    QSignalSpy activitySpy(ram.get(),
+                           &peer::RemoteActivityMonitor::peerActivityChanged);
+    ram->handleReceivedDatagram(
+        meetingBytes(peerUuid, "r16", now.toSecsSinceEpoch(), 1,
+                     peer::MEETING_STARTED, makeSecret()),
+        3, now);
+
+    QCOMPARE(activitySpy.count(), 0);    // no fused-active transition
+    QVERIFY(!ram->anyPeerActive());
+    QVERIFY(ram->anyPeerInMeeting());
+  }
+
+  void peer_meeting_flipping_only_emits_on_transitions() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QByteArray peerUuid = makeUuid(0x77);
+    QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    QSignalSpy spy(ram.get(), &peer::RemoteActivityMonitor::peerMeetingChanged);
+    // Two consecutive MEETING_STARTED packets must emit only once.
+    for (quint64 nonce : {1u, 2u}) {
+      ram->handleReceivedDatagram(
+          meetingBytes(peerUuid, "r16", now.toSecsSinceEpoch(), nonce,
+                       peer::MEETING_STARTED, makeSecret()),
+          3, now);
+      now = now.addSecs(1);
+    }
+    QCOMPARE(spy.count(), 1);
+  }
+
+  void peer_self_meeting_does_not_loopback() {
+    // The loopback drop is already enforced by sender_uuid equality, but
+    // make the Phase 14 path explicit — a MEETING packet from our own
+    // sender_uuid must not flip our own aggregate.
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    QSignalSpy spy(ram.get(), &peer::RemoteActivityMonitor::peerMeetingChanged);
+    ram->handleReceivedDatagram(
+        meetingBytes(ram->senderUuid(), "self",
+                     now.toSecsSinceEpoch(), 1,
+                     peer::MEETING_STARTED, makeSecret()),
+        3, now);
+
+    QCOMPARE(spy.count(), 0);
+    QVERIFY(!ram->anyPeerInMeeting());
+    QCOMPARE(ram->peerCount(), 0);
+  }
+
+  void peer_in_meeting_offline_after_unreachable_window_clears_aggregate() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QByteArray peerUuid = makeUuid(0x77);
+    QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    ram->handleReceivedDatagram(
+        meetingBytes(peerUuid, "r16", now.toSecsSinceEpoch(), 1,
+                     peer::MEETING_STARTED, makeSecret()),
+        3, now);
+    QVERIFY(ram->anyPeerInMeeting());
+
+    QSignalSpy spy(ram.get(), &peer::RemoteActivityMonitor::peerMeetingChanged);
+    // Advance well past peerUnreachableWindowSeconds (default 60). The
+    // peer never re-sends anything — it should be evicted by tick() and
+    // m_anyPeerInMeeting should flip to false.
+    now = now.addSecs(120);
+    ram->tick(now);
+
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.first().first().toBool(), false);
+    QVERIFY(!ram->anyPeerInMeeting());
+    QCOMPARE(ram->peerCount(), 0);
+  }
+
+  void meeting_transition_extends_recency_for_passive_peer() {
+    // A peer that sends only MEETING_TRANSITION (passive listening, no
+    // keyboard input) must NOT be evicted before the unreachable window
+    // elapses since its last MEETING packet. tick()'s recency check now
+    // considers lastSeenMeetingTransition.
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QByteArray peerUuid = makeUuid(0x77);
+    QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    ram->handleReceivedDatagram(
+        meetingBytes(peerUuid, "r16", now.toSecsSinceEpoch(), 1,
+                     peer::MEETING_STARTED, makeSecret()),
+        3, now);
+
+    // 30s later — still within the 60s default unreachable window. Peer
+    // has sent zero other packets.
+    now = now.addSecs(30);
+    ram->tick(now);
+    QCOMPARE(ram->peerCount(), 1);
+    QVERIFY(ram->anyPeerInMeeting());
+  }
+
+  void build_meeting_transition_packet_has_correct_shape() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    for (uint8_t state : {peer::MEETING_ENDED, peer::MEETING_STARTED}) {
+      const QByteArray bytes = ram->buildMeetingTransitionPacket(now, state);
+      QVERIFY(!bytes.isEmpty());
+
+      const auto packet = peer::decodePacket(bytes, makeSecret());
+      QVERIFY(packet.has_value());
+      QCOMPARE(packet->eventType, uint8_t(peer::EVENT_MEETING_TRANSITION));
+      QCOMPARE(packet->payload.size(), qsizetype(1));
+      QCOMPARE(static_cast<uint8_t>(packet->payload[0]), state);
     }
   }
 };

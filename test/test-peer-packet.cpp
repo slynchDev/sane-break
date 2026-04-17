@@ -249,6 +249,73 @@ class TestPeerPacket : public QObject {
     QCOMPARE(why, QString("bad IDLE_TRANSITION state byte"));
   }
 
+  // --- Phase 14: MEETING_TRANSITION wire format ------------------------------
+
+  void round_trip_meeting_transition_started() {
+    auto secret = makeSecret();
+    peer::Packet p;
+    p.senderUuid = makeUuid(3);
+    p.hostname = "r16";
+    p.timestamp = 1'700'000'000;
+    p.nonce = 7;
+    p.eventType = peer::EVENT_MEETING_TRANSITION;
+    p.payload = QByteArray(1, static_cast<char>(peer::MEETING_STARTED));
+    auto bytes = peer::encodePacket(p, secret);
+
+    auto decoded = peer::decodePacket(bytes, secret);
+    QVERIFY(decoded.has_value());
+    QCOMPARE(uint8_t(decoded->eventType),
+             uint8_t(peer::EVENT_MEETING_TRANSITION));
+    QCOMPARE(decoded->payload.size(), qsizetype(1));
+    QCOMPARE(static_cast<uint8_t>(decoded->payload[0]),
+             uint8_t(peer::MEETING_STARTED));
+  }
+
+  void round_trip_meeting_transition_ended() {
+    auto secret = makeSecret();
+    peer::Packet p;
+    p.senderUuid = makeUuid(3);
+    p.hostname = "r16";
+    p.timestamp = 1'700'000'000;
+    p.nonce = 8;
+    p.eventType = peer::EVENT_MEETING_TRANSITION;
+    p.payload = QByteArray(1, static_cast<char>(peer::MEETING_ENDED));
+    auto bytes = peer::encodePacket(p, secret);
+
+    auto decoded = peer::decodePacket(bytes, secret);
+    QVERIFY(decoded.has_value());
+    QCOMPARE(static_cast<uint8_t>(decoded->payload[0]),
+             uint8_t(peer::MEETING_ENDED));
+  }
+
+  void decode_fails_on_meeting_transition_payload_wrong_size() {
+    auto secret = makeSecret();
+    auto bytes = buildSignedRaw(peer::kMagic, peer::kVersion, peer::kKeyIdV1,
+                                makeUuid(1), 0, {}, 1'700'000'000, 1,
+                                peer::EVENT_MEETING_TRANSITION, 0, {}, secret);
+    QString why;
+    QVERIFY(!peer::decodePacket(bytes, secret, &why).has_value());
+    QCOMPARE(why, QString("bad MEETING_TRANSITION payload size"));
+
+    auto bytes2 = buildSignedRaw(peer::kMagic, peer::kVersion, peer::kKeyIdV1,
+                                 makeUuid(1), 0, {}, 1'700'000'000, 2,
+                                 peer::EVENT_MEETING_TRANSITION, 2,
+                                 QByteArray(2, '\0'), secret);
+    QVERIFY(!peer::decodePacket(bytes2, secret, &why).has_value());
+    QCOMPARE(why, QString("bad MEETING_TRANSITION payload size"));
+  }
+
+  void decode_fails_on_meeting_transition_bad_state_byte() {
+    auto secret = makeSecret();
+    QByteArray p02(1, '\x02');
+    auto bytes = buildSignedRaw(peer::kMagic, peer::kVersion, peer::kKeyIdV1,
+                                makeUuid(1), 0, {}, 1'700'000'000, 1,
+                                peer::EVENT_MEETING_TRANSITION, 1, p02, secret);
+    QString why;
+    QVERIFY(!peer::decodePacket(bytes, secret, &why).has_value());
+    QCOMPARE(why, QString("bad MEETING_TRANSITION state byte"));
+  }
+
   void decode_fails_on_tampered_hmac() {
     auto secret = makeSecret();
     auto bytes = peer::encodePacket(makeActivityPacket(), secret);
