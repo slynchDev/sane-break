@@ -58,12 +58,12 @@
 
 ## Phase 3: RemoteActivityMonitor core (peer state, sockets)
 
-- [ ] **3.1** `RemoteActivityMonitor` class skeleton
+- [x] **3.1** `RemoteActivityMonitor` class skeleton
   - New `src/lib/remote-activity-monitor.{h,cpp}`. Subclass `QObject`. Constructor signature `RemoteActivityMonitor(SanePreferences* prefs, SystemIdleTime* localIdle, QObject* parent = nullptr)` — `localIdle` MUST be the raw local `SystemIdleTime`, NOT an `EffectiveIdleTime` facade; wiring the facade here creates a peer-feedback loop (peer active → facade reports active → our heartbeat re-broadcasts → peer sees us active forever). Owns a `QByteArray m_secret`, `QByteArray m_senderUuid` (fresh `QUuid::createUuid().toRfc4122()` per process), `PeerReplayBuffer m_replay`, and a map `QHash<QByteArray, PeerState> m_peers` where key is sender_uuid. Define `enum class PeerLastState { Active, Idle }` and `struct PeerState { QString hostname; QDateTime lastSeenActive; QDateTime lastSeenIdle; PeerLastState lastState; int activeSecondsSinceLastBreak; }`. `lastState` is the normalized state (Active/Idle) — distinct from the raw `event_type` byte — so the three packet shapes (ACTIVITY, IDLE_TRANSITION{active}, IDLE_TRANSITION{idle}) all collapse cleanly into this enum at update time (task 3.3). Expose signals: `void peerActivityChanged(bool anyPeerActive);`. Provide `void start()` / `void stop()` lifecycle methods. `stop()` SHALL clear `m_peers`, cancel the offline-cleanup timer (task 3.5) and the heartbeat timer (task 4.1), close any open sockets (task 3.2), and — if the cached aggregate was true — emit `peerActivityChanged(false)` so `EffectiveIdleTime` drops back to pass-through semantics.
   - _Depends: 1.2, 1.3, 2.1, 2.4_
   - _Spec: Requirements 2.1-2.2, 3.4, 7.3_
 
-- [ ] **3.2** UDP socket setup with interface allowlist
+- [x] **3.2** UDP socket setup with interface allowlist
   - Store per-interface tuples `struct InterfaceSocket { QUdpSocket* socket; QHostAddress localAddr; QHostAddress subnetBroadcast; int interfaceIndex; }` in a `QList<InterfaceSocket>`. Also maintain `QSet<int> m_allowedInterfaceIndexes` for ingress filtering (task 3.3). In `RemoteActivityMonitor::start()`, for each interface name in `preferences->peerBroadcastInterfaces->get()`:
     1. `QNetworkInterface iface = QNetworkInterface::interfaceFromName(name);` — if invalid or down, log a user-visible warning and skip this entry (partial failure is OK; other interfaces still work).
     2. Pick the first IPv4 `QNetworkAddressEntry` from `iface.addressEntries()`; skip if none. Store `entry.ip()` as `localAddr`, `entry.broadcast()` as `subnetBroadcast` (e.g., `192.168.1.255` for a `192.168.1.0/24` subnet), and `iface.index()` as `interfaceIndex`; insert the index into `m_allowedInterfaceIndexes`. `QHostAddress::Broadcast` (`255.255.255.255`) is NOT used on egress — Linux routes it via the default route regardless of socket binding, which would leak packets onto whichever interface matches the default route, defeating the allowlist.
@@ -73,7 +73,7 @@
   - _Depends: 3.1_
   - _Spec: Requirements 1.5-1.6, 2.1, 11.4_
 
-- [ ] **3.3** Datagram dispatch: receive → interface filter → decode → verify → update peer
+- [x] **3.3** Datagram dispatch: receive → interface filter → decode → verify → update peer
   - Implement `onDatagramReady()` using `QObject::sender()` to identify which socket fired, then loop `while (sock->hasPendingDatagrams())` calling `QNetworkDatagram dg = sock->receiveDatagram()` (not `readDatagram`, which discards the arrival-interface metadata). Per Req 2.1 ingress filtering: if `dg.interfaceIndex()` is not in `m_allowedInterfaceIndexes` (task 3.2), drop silently — a packet arriving on a non-allowlisted NIC (corporate VPN, guest Wi-Fi, tenant bridge) must not mutate peer state even if its HMAC is valid. Then `decodePacket(dg.data(), m_secret)`; drop silently on failure. If `packet.senderUuid == m_senderUuid`, drop (self-loopback per Req 1.7). Timestamp-window check (`|now - ts| > 30s` OR `ts > now + 5s`) + replay-buffer check; drop on either failure. Insert into replay buffer. Look up or create `PeerState` for `packet.senderUuid`; update `hostname` (first-seen) and normalize the event into `PeerLastState`:
     - `event_type == ACTIVITY` → `lastSeenActive = now; lastState = Active`
     - `event_type == IDLE_TRANSITION` AND `payload state byte == 0x01` → `lastSeenActive = now; lastState = Active`
@@ -82,17 +82,17 @@
   - _Depends: 2.3, 2.4, 3.1, 3.2_
   - _Spec: Requirements 1.7, 2.1-2.4, 3.2-3.4_
 
-- [ ] **3.4** `anyPeerActive` aggregation logic
+- [x] **3.4** `anyPeerActive` aggregation logic
   - Private `bool computeAnyPeerActive() const`: iterate `m_peers`, return true iff at least one peer has `lastSeenActive` within `peerActiveWindowSeconds` AND `lastState == PeerLastState::Active`. `recomputeAnyPeerActive()` computes the new value, compares to cached previous, and emits `peerActivityChanged(newValue)` on transition only.
   - _Depends: 3.1_
   - _Spec: Requirements 2.3, 2.4_
 
-- [ ] **3.5** Peer offline cleanup + periodic aggregate recompute
+- [x] **3.5** Peer offline cleanup + periodic aggregate recompute
   - QTimer with 1-second interval started in `start()` (the same 1 s cadence as the attribution tick in 6.1 — implementations MAY share one timer). On every tick: (a) iterate `m_peers`, remove entries whose `max(lastSeenActive, lastSeenIdle)` is older than `peerUnreachableWindowSeconds`; (b) unconditionally call `recomputeAnyPeerActive()`. The unconditional recompute bounds staleness of the `peerActiveWindowSeconds` → idle transition to 1 second; without it, a peer that simply stops broadcasting would keep the aggregate stuck at `true` until it crosses the `peerUnreachableWindowSeconds` threshold (up to 45 s stale with default settings, blocking local `idleStart` emission).
   - _Depends: 3.1, 3.4_
   - _Spec: Requirements 2.3, 2.4, 2.8, 11.2_
 
-- [ ] **3.6** Unit tests for peer state dispatch
+- [x] **3.6** Unit tests for peer state dispatch
   - Add tests in `test/test-remote-activity-monitor.cpp`: valid ACTIVITY / IDLE_TRANSITION{active} / IDLE_TRANSITION{idle} each update peer state and `lastState` correctly; ACTIVITY → IDLE_TRANSITION{active} → IDLE_TRANSITION{idle} sequence drives the aggregate through Active→Active→Idle transitions at the right edges; self-packet drops; duplicate nonce drops; timestamp too old (`ts = now - 31s`) drops; timestamp too new (`ts = now + 6s`) drops; ingress interface filter drops packets whose `QNetworkDatagram::interfaceIndex()` is not in `m_allowedInterfaceIndexes`; `peerActivityChanged` fires only on true→false or false→true transitions; silent peer's aggregate flips within 1 s of crossing `peerActiveWindowSeconds`; peer offline timeout removes and flips aggregate. Property 1 (active fusion monotonicity) and Property 4 (self-traffic immunity) anchor specific tests here.
   - _Depends: 3.3, 3.4, 3.5_
   - _Spec: Requirements 1.7, 2.1-2.4, 2.8, 3.3; Properties 1, 4_
