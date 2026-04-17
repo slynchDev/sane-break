@@ -382,12 +382,14 @@ void AppStateMeeting::enter(AppContext* app) {
   app->data->resetSecondsToNextBreak();
   app->idleTimer->setWatchAccuracy(5000);
   app->idleTimer->setMinIdleTime(app->preferences->pauseOnIdleFor->get() * 1000);
+  emit app->meetingStart();
 }
 
 void AppStateMeeting::exit(AppContext* app) {
   app->closeCurrentSpan();
   app->data->clearMeetingData();
   app->meetingPrompt->closeEndPrompt();
+  emit app->meetingEnd();
 }
 
 void AppStateMeeting::tick(AppContext* app) {

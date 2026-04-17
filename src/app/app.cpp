@@ -74,6 +74,13 @@ SaneBreakApp::SaneBreakApp(const AppDependencies& deps, QObject* parent)
     // local and per-peer active-seconds counters for the new cycle.
     connect(this, &AppContext::breakStart, m_ram,
             &peer::RemoteActivityMonitor::resetAttribution);
+    // Phase 14: meetingStart/End are emitted from AppStateMeeting::enter/exit
+    // so peer machines learn the local host is in a meeting and can suppress
+    // their own idle-driven break scheduling for the duration.
+    connect(this, &AppContext::meetingStart, m_ram,
+            &peer::RemoteActivityMonitor::broadcastMeetingStart);
+    connect(this, &AppContext::meetingEnd, m_ram,
+            &peer::RemoteActivityMonitor::broadcastMeetingEnd);
   }
 
   connect(this, &SaneBreakApp::trayDataUpdated, tray, &StatusTrayWindow::update);

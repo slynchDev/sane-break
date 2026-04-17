@@ -107,6 +107,11 @@ class AppContext : public QObject {
   // on break transitions without coupling AppStateBreak to peer logic.
   void breakStart();
   void breakEnd();
+  // Phase 14 — emitted from AppStateMeeting::enter() / AppStateMeeting::exit()
+  // so the peer fusion layer can broadcast MEETING_TRANSITION packets without
+  // coupling AppStateMeeting to peer logic.
+  void meetingStart();
+  void meetingEnd();
 
  protected:
   std::unique_ptr<AppState> m_currentState;
