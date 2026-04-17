@@ -247,6 +247,58 @@ class TestEffectiveIdleTime : public QObject {
     QVERIFY(!eff.isIdle());
     delete ram;
   }
+
+  // ---- Runtime peer-fusion toggle (Phase 9 wiring, Property 7) ------
+  //
+  // When the host app calls ram->stop() in response to peerFusionEnabled
+  // flipping off mid-session, the facade MUST fall back to pass-through
+  // semantics within the same event-loop turn — no rebuild of the
+  // dependency graph. ram::stop() emits peerActivityChanged(false) if the
+  // aggregate was true; the facade consumes that edge and re-runs its
+  // fused-idle recompute.
+
+  void ram_stop_after_peer_active_restores_local_idle() {
+    MockIdleTime wrapped;
+    auto* ram = makeRam(&wrapped);
+    EffectiveIdleTime eff(&wrapped, ram);
+
+    // Peer active + local idle → facade suppresses idleStart (fused=active).
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    ram->handleReceivedDatagram(
+        activityBytes(makeUuid(0x55), now.toSecsSinceEpoch(), 1, makeSecret()),
+        3, now);
+    QVERIFY(ram->anyPeerActive());
+    wrapped.triggerIdleStart();
+    QVERIFY(!eff.isIdle());  // suppressed by peer
+
+    // Host app toggles peerFusionEnabled → false → ram->stop(). The facade
+    // should immediately drop to pass-through and emit idleStart because
+    // the wrapped timer is still idle.
+    QSignalSpy spyStart(&eff, &SystemIdleTime::idleStart);
+    ram->stop();
+    QCOMPARE(spyStart.count(), 1);
+    QVERIFY(eff.isIdle());
+    delete ram;
+  }
+
+  void ram_stop_with_no_peers_is_no_op_for_facade() {
+    MockIdleTime wrapped;
+    auto* ram = makeRam(&wrapped);
+    EffectiveIdleTime eff(&wrapped, ram);
+
+    // Local goes idle, no peers active → facade already emitted idleStart.
+    QSignalSpy spyStart(&eff, &SystemIdleTime::idleStart);
+    QSignalSpy spyEnd(&eff, &SystemIdleTime::idleEnd);
+    wrapped.triggerIdleStart();
+    QCOMPARE(spyStart.count(), 1);
+
+    // ram->stop() with no active peers must NOT produce a spurious edge.
+    ram->stop();
+    QCOMPARE(spyStart.count(), 1);
+    QCOMPARE(spyEnd.count(), 0);
+    QVERIFY(eff.isIdle());
+    delete ram;
+  }
 };
 
 QTEST_MAIN(TestEffectiveIdleTime)

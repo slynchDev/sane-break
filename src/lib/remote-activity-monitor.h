@@ -91,6 +91,9 @@ class RemoteActivityMonitor : public QObject {
   QByteArray senderUuid() const { return m_senderUuid; }
   bool anyPeerActive() const { return m_anyPeerActive; }
   int peerCount() const { return m_peers.size(); }
+  // True iff start() successfully loaded a secret AND bound at least one
+  // socket. Used by the host app's rebind-failure-revert path (Req 7.8).
+  bool isRunning() const { return m_running; }
   QList<PeerStatus> peerStatuses(const QDateTime& now) const;
 
   // Test hooks — safe to call from tests that bypass start() to avoid real

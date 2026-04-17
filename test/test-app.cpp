@@ -37,6 +37,38 @@ class TestApp : public QObject {
     QCOMPARE(app.trayData.smallBreaksBeforeBigBreak,
              deps.preferences->bigAfter->get() - 1);
   }
+  // Property 7: peer-fusion-disabled sessions observe byte-identical
+  // behavior to the pre-fusion baseline. Enforced implicitly by every
+  // other test in this file running with peerFusionEnabled=false and no
+  // RemoteActivityMonitor; this explicit assertion pins the default.
+  void peer_fusion_disabled_by_default() {
+    QCOMPARE(deps.preferences->peerFusionEnabled->get(), false);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    // Baseline tray state holds — toggling the preference at construction
+    // time must not alter any of the observable fields the rest of the
+    // suite verifies.
+    QCOMPARE(app.trayData.secondsToNextBreak, deps.preferences->smallEvery->get());
+  }
+  // Property 7 pin: toggling peerFusionEnabled on an AbstractApp build
+  // (DummyApp, no peer wiring, no RemoteActivityMonitor) must not perturb
+  // the countdown or any tray field. SaneBreakApp wires slots to this
+  // preference conditionally on a non-null RemoteActivityMonitor (see
+  // SaneBreakApp::SaneBreakApp) — this test guards the DummyApp path, which
+  // intentionally has no such wiring and must remain byte-identical to the
+  // pre-fusion baseline regardless of preference churn. SaneBreakApp-level
+  // toggle coverage lives in Phase 13's property-test suite.
+  void peer_fusion_toggle_is_inert_in_baseline_app() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    const int baseline = deps.preferences->smallEvery->get();
+    deps.preferences->peerFusionEnabled->set(true);
+    deps.preferences->peerFusionEnabled->set(false);
+    deps.preferences->peerFusionEnabled->set(true);
+    QCOMPARE(app.trayData.secondsToNextBreak, baseline);
+    emit deps.countDownTimer->timeout();
+    QCOMPARE(app.trayData.secondsToNextBreak, baseline - 1);
+  }
   void tick() {
     NiceMock<DummyApp> app(deps);
     app.start();

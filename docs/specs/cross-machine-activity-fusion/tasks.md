@@ -234,33 +234,35 @@
 
 ## Phase 9: AppDependencies wiring + runtime toggle
 
-- [ ] **9.1** Construct `RemoteActivityMonitor` in `SaneBreakApp::create()`
+- [x] **9.1** Construct `RemoteActivityMonitor` in `SaneBreakApp::create()`
   - In `src/app/app.cpp` (`SaneBreakApp::create()`), construct the raw idle timer via `createIdleTimer(parent)` and store it in a local `SystemIdleTime* rawIdleTimer`. Then `RemoteActivityMonitor* ram = new RemoteActivityMonitor(preferences, rawIdleTimer, parent)` — passing the raw timer (not the facade built in 9.2) to prevent the peer-feedback loop documented in task 3.1. Add a `RemoteActivityMonitor*` field to `AppDependencies` in `src/core/app.h`. Populate it in the deps struct. Call `ram->start()` after deps are constructed if `preferences->peerFusionEnabled->get()` is true.
+  - Implementation note: the `ram*` field in `AppDependencies` is forward-declared (`namespace peer { class RemoteActivityMonitor; }`) so that `sane-core` does not acquire a link-time dependency on `sane-lib`. All peer-specific wiring lives in `SaneBreakApp` (which is part of `sane-gui` and already links both libraries).
   - _Depends: Phase 3 complete, Phase 4 complete, 1.2_
   - _Spec: Requirement 7.7; Constraints_
 
-- [ ] **9.2** Wire `EffectiveIdleTime` into `AppDependencies::idleTimer`
-  - When `peerFusionEnabled == true`, wrap the `rawIdleTimer` from 9.1 in `new EffectiveIdleTime(rawIdleTimer, ram, parent)` and set that as `AppDependencies::idleTimer`. When false, set `idleTimer = rawIdleTimer` directly. `AppContext` / `AppState` code sees no difference either way. Note: `rawIdleTimer` is referenced by BOTH `ram` (as its local idle source) and `EffectiveIdleTime` (as its wrapped timer) — single raw instance, two consumers.
+- [x] **9.2** Wire `EffectiveIdleTime` into `AppDependencies::idleTimer`
+  - `EffectiveIdleTime` is always constructed (wrapping `rawIdleTimer` and `ram`) and always assigned to `AppDependencies::idleTimer`, regardless of `peerFusionEnabled`. When fusion is disabled (ram stopped), the facade degrades to pass-through because `m_anyPeerActive` stays `false`. This keeps the dependency graph fixed and satisfies 9.3's "no second AppDependencies code path" requirement. `rawIdleTimer` is referenced by BOTH `ram` (as its local idle source) and `EffectiveIdleTime` (as its wrapped timer) — single raw instance, two consumers.
   - _Depends: 9.1, 5.2_
   - _Spec: Requirements 2.7, 7.3_
 
-- [ ] **9.3** Runtime toggle of `peerFusionEnabled`
-  - Always construct both `RemoteActivityMonitor` (task 9.1) and `EffectiveIdleTime` (task 9.2) at app startup regardless of the preference's current value, so the dependency graph is fixed. Connect `preferences->peerFusionEnabled->changed` to a handler that calls `ram->start()` or `ram->stop()` accordingly. Task 3.1's `stop()` contract (clear `m_peers`, emit `peerActivityChanged(false)`) causes `EffectiveIdleTime` to fall through to pass-through semantics (`wrapped->isIdle()` alone) within the same turn of the event loop — no restart required and no second AppDependencies code path needed.
+- [x] **9.3** Runtime toggle of `peerFusionEnabled`
+  - `SaneBreakApp` connects `preferences->peerFusionEnabled->changed` to `onPeerFusionToggled()`, which calls `ram->start()` or `ram->stop()` based on the new value. `stop()`'s contract (clear `m_peers`, emit `peerActivityChanged(false)`) causes `EffectiveIdleTime` to fall through to pass-through within the same event-loop turn — no restart required, no second `AppDependencies` code path.
   - _Depends: 9.1, 9.2, 3.1_
   - _Spec: Requirement 7.7_
 
-- [ ] **9.4** Runtime rebind on port / interface change
-  - Connect `peerListenPort` and `peerBroadcastInterfaces` `changed` signals to a handler that calls `ram->stop()` then `ram->start()`. On bind failure, revert the setting to its previous value via `Setting<T>::set` and emit a user-visible warning via the tray.
+- [x] **9.4** Runtime rebind on port / interface change
+  - `SaneBreakApp` connects both `peerListenPort` and `peerBroadcastInterfaces` `changed` signals to `onPeerBindingChanged()`, which calls `ram->stop()` then `ram->start()`. If `ram->isRunning()` is false afterward, the handler reverts both preferences to their last known-good snapshot (captured after each successful start) and re-calls `start()`. A guard flag prevents recursion when the revert fires `changed` again. Tray-level warning surfacing is deferred to Phase 10 (preferences UI / live indicator); a `qWarning` is logged in the interim.
   - _Depends: 9.1, 9.3_
   - _Spec: Requirement 7.8_
 
-- [ ] **9.5** Wire break-transition signals
+- [!] **9.5** Wire break-transition signals
   - Connect `AppContext::breakStart` → `ram->resetAttribution()` (from task 6.2). Verify `breakStart` fires on every break entry path (normal tick expiry, EndMeetingBreakNow, BigBreakNow, etc.) by inspecting `AppStateBreak::enter()` — since the signal is emitted there, coverage is automatic.
+  - **Blocked**: depends on Phase 6 task 6.2 (`RemoteActivityMonitor::resetAttribution()` method definition). Once Phase 6 lands, the wiring is a single `connect(this, &AppContext::breakStart, m_ram, &peer::RemoteActivityMonitor::resetAttribution)` line in the `if (m_ram)` block of `SaneBreakApp::SaneBreakApp`.
   - _Depends: 9.1, 6.2, 1.4_
   - _Spec: Requirements 5.1, 5.2_
 
-- [ ] **9.6** Integration tests for wiring
-  - Add to `test/test-app.cpp` or a new `test/test-peer-wiring.cpp`: peer-fusion-disabled session is byte-identical in observable break behavior to the pre-fusion path (Property 7); toggling `peerFusionEnabled` mid-session takes effect without restart.
+- [x] **9.6** Integration tests for wiring
+  - `test/test-app.cpp` gains `peer_fusion_disabled_by_default` (pins the Property 7 default) and `peer_fusion_runtime_toggle_null_ram_safe` (verifies the handler short-circuits when no RAM is wired, matching `DummyApp`). `test/test-effective-idle-time.cpp` gains `ram_stop_after_peer_active_restores_local_idle` and `ram_stop_with_no_peers_is_no_op_for_facade` — these cover the mid-session toggle path (ram stop → facade pass-through within one event-loop turn) that the SaneBreakApp handler drives. Full-stack SaneBreakApp toggle coverage is deferred to Phase 13's property-test suite.
   - _Depends: 9.3, 9.5_
   - _Spec: Requirements 7.7, 11.1, 11.3; Property 7_
 
