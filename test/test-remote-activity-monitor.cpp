@@ -27,6 +27,15 @@ class MockIdleTime : public SystemIdleTime {
   void stopWatching() override {}
   void setWatchAccuracy(int) override {}
   void setMinIdleTime(int) override {}
+  void setIdle(bool idle) { m_isIdle = idle; }
+  void triggerIdleStart() {
+    m_isIdle = true;
+    emit idleStart();
+  }
+  void triggerIdleEnd() {
+    m_isIdle = false;
+    emit idleEnd();
+  }
 };
 
 QByteArray makeSecret() {
@@ -329,6 +338,80 @@ class TestRemoteActivityMonitor : public QObject {
     // Flip the last HMAC byte.
     bytes[bytes.size() - 1] = bytes[bytes.size() - 1] ^ 0xFF;
     ram->handleReceivedDatagram(bytes, 3, now);
+    QCOMPARE(ram->peerCount(), 0);
+  }
+
+  // ---- Phase 4: outbound -------------------------------------------------
+
+  void build_activity_packet_has_correct_shape() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    const QByteArray bytes = ram->buildActivityPacket(now, 7);
+    QVERIFY(!bytes.isEmpty());
+    auto decoded = peer::decodePacket(bytes, makeSecret());
+    QVERIFY(decoded.has_value());
+    QCOMPARE(decoded->senderUuid, ram->senderUuid());
+    QCOMPARE(uint8_t(decoded->eventType), uint8_t(peer::EVENT_ACTIVITY));
+    QCOMPARE(decoded->timestamp, qint64(1'700'000'000));
+    QCOMPARE(decoded->payload.size(), qsizetype(4));
+    // event_count=7 big-endian: 0x00 0x00 0x00 0x07
+    QCOMPARE(uint8_t(decoded->payload[3]), uint8_t(0x07));
+    QCOMPARE(uint8_t(decoded->payload[2]), uint8_t(0x00));
+    QCOMPARE(uint8_t(decoded->payload[1]), uint8_t(0x00));
+    QCOMPARE(uint8_t(decoded->payload[0]), uint8_t(0x00));
+  }
+
+  void build_idle_transition_idle_has_state_zero() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    const QByteArray bytes = ram->buildIdleTransitionPacket(now, peer::STATE_IDLE);
+    auto decoded = peer::decodePacket(bytes, makeSecret());
+    QVERIFY(decoded.has_value());
+    QCOMPARE(uint8_t(decoded->eventType),
+             uint8_t(peer::EVENT_IDLE_TRANSITION));
+    QCOMPARE(decoded->payload.size(), qsizetype(1));
+    QCOMPARE(uint8_t(decoded->payload[0]), uint8_t(peer::STATE_IDLE));
+  }
+
+  void build_idle_transition_active_has_state_one() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    const QByteArray bytes =
+        ram->buildIdleTransitionPacket(now, peer::STATE_ACTIVE);
+    auto decoded = peer::decodePacket(bytes, makeSecret());
+    QVERIFY(decoded.has_value());
+    QCOMPARE(uint8_t(decoded->payload[0]), uint8_t(peer::STATE_ACTIVE));
+  }
+
+  void build_activity_packet_empty_without_secret() {
+    // No testSetSecret call — monitor has no secret loaded.
+    auto ram =
+        std::make_unique<peer::RemoteActivityMonitor>(m_prefs, m_idle);
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    QVERIFY(ram->buildActivityPacket(now, 1).isEmpty());
+    QVERIFY(ram->buildIdleTransitionPacket(now, peer::STATE_IDLE).isEmpty());
+  }
+
+  void two_activity_packets_have_distinct_nonces() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    auto a = peer::decodePacket(ram->buildActivityPacket(now, 1), makeSecret());
+    auto b = peer::decodePacket(ram->buildActivityPacket(now, 1), makeSecret());
+    QVERIFY(a.has_value() && b.has_value());
+    QVERIFY(a->nonce != b->nonce);
+  }
+
+  void self_emission_roundtrip_is_ignored() {
+    // Property 4 (self-traffic immunity): if a packet we built is looped back
+    // via an allowlisted interface, handleReceivedDatagram must drop it.
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    const QByteArray bytes = ram->buildActivityPacket(now, 1);
+    QVERIFY(!bytes.isEmpty());
+    QSignalSpy spy(ram.get(),
+                   &peer::RemoteActivityMonitor::peerActivityChanged);
+    ram->handleReceivedDatagram(bytes, 3, now);
+    QCOMPARE(spy.count(), 0);
     QCOMPARE(ram->peerCount(), 0);
   }
 };

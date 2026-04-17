@@ -8,6 +8,7 @@
 #include <QNetworkAddressEntry>
 #include <QNetworkDatagram>
 #include <QNetworkInterface>
+#include <QRandomGenerator>
 #include <QStringList>
 #include <QTimer>
 #include <QUdpSocket>
@@ -22,6 +23,7 @@ namespace {
 constexpr int kReplayWindowSeconds = 30;
 constexpr int kClockSkewToleranceSeconds = 5;
 constexpr int kTickIntervalMs = 1000;
+constexpr int kSendFailureWarnIntervalSeconds = 60;
 
 }  // namespace
 
@@ -32,7 +34,14 @@ RemoteActivityMonitor::RemoteActivityMonitor(SanePreferences* prefs,
       m_prefs(prefs),
       m_localIdle(localIdle),
       m_senderUuid(QUuid::createUuid().toRfc4122()) {
-  (void)m_localIdle;  // Phase 4 wires signals; reserved for now.
+  // Connect to the raw local idle signals in the constructor so we never
+  // miss an edge even if start()/stop() is toggled around them. The slots
+  // no-op when m_running is false, so edges delivered while the monitor is
+  // stopped harmlessly fall on the floor.
+  connect(m_localIdle, &SystemIdleTime::idleStart, this,
+          &RemoteActivityMonitor::onLocalIdleStart);
+  connect(m_localIdle, &SystemIdleTime::idleEnd, this,
+          &RemoteActivityMonitor::onLocalIdleEnd);
 }
 
 RemoteActivityMonitor::~RemoteActivityMonitor() { closeSockets(); }
@@ -61,6 +70,15 @@ void RemoteActivityMonitor::start() {
             &RemoteActivityMonitor::onTimerTick);
   }
   m_tickTimer->start();
+
+  if (!m_heartbeatTimer) {
+    m_heartbeatTimer = new QTimer(this);
+    connect(m_heartbeatTimer, &QTimer::timeout, this,
+            &RemoteActivityMonitor::onHeartbeatTick);
+  }
+  m_heartbeatTimer->setInterval(m_prefs->peerHeartbeatIntervalSeconds->get() *
+                                1000);
+  m_heartbeatTimer->start();
   m_running = true;
 }
 
@@ -71,6 +89,8 @@ void RemoteActivityMonitor::stop() {
   }
   m_running = false;
   if (m_tickTimer) m_tickTimer->stop();
+  if (m_heartbeatTimer) m_heartbeatTimer->stop();
+  m_lastSendWarnAt.clear();
   closeSockets();
   m_peers.clear();
   if (m_anyPeerActive) {
@@ -226,6 +246,84 @@ void RemoteActivityMonitor::handleReceivedDatagram(const QByteArray& bytes,
 
 void RemoteActivityMonitor::onTimerTick() {
   tick(QDateTime::currentDateTimeUtc());
+}
+
+void RemoteActivityMonitor::onHeartbeatTick() {
+  if (!m_running) return;
+  // Skip emission while locally idle — only active users need to signal.
+  if (m_localIdle && m_localIdle->isIdle()) return;
+  const QDateTime now = QDateTime::currentDateTimeUtc();
+  QByteArray bytes = buildActivityPacket(now, 1);
+  if (bytes.isEmpty()) return;
+  sendToAllInterfaces(bytes, now);
+}
+
+void RemoteActivityMonitor::onLocalIdleStart() {
+  if (!m_running) return;
+  const QDateTime now = QDateTime::currentDateTimeUtc();
+  QByteArray bytes = buildIdleTransitionPacket(now, STATE_IDLE);
+  if (bytes.isEmpty()) return;
+  sendToAllInterfaces(bytes, now);
+}
+
+void RemoteActivityMonitor::onLocalIdleEnd() {
+  if (!m_running) return;
+  const QDateTime now = QDateTime::currentDateTimeUtc();
+  QByteArray bytes = buildIdleTransitionPacket(now, STATE_ACTIVE);
+  if (bytes.isEmpty()) return;
+  sendToAllInterfaces(bytes, now);
+}
+
+QByteArray RemoteActivityMonitor::buildActivityPacket(const QDateTime& now,
+                                                      quint32 eventCount) const {
+  if (m_secret.isEmpty()) return {};
+  Packet p;
+  p.senderUuid = m_senderUuid;
+  p.hostname = QHostInfo::localHostName();
+  p.timestamp = now.toSecsSinceEpoch();
+  p.nonce = QRandomGenerator::global()->generate64();
+  p.eventType = EVENT_ACTIVITY;
+  p.payload.resize(4);
+  p.payload[0] = static_cast<char>((eventCount >> 24) & 0xFF);
+  p.payload[1] = static_cast<char>((eventCount >> 16) & 0xFF);
+  p.payload[2] = static_cast<char>((eventCount >> 8) & 0xFF);
+  p.payload[3] = static_cast<char>(eventCount & 0xFF);
+  return encodePacket(p, m_secret);
+}
+
+QByteArray RemoteActivityMonitor::buildIdleTransitionPacket(
+    const QDateTime& now, uint8_t state) const {
+  if (m_secret.isEmpty()) return {};
+  Packet p;
+  p.senderUuid = m_senderUuid;
+  p.hostname = QHostInfo::localHostName();
+  p.timestamp = now.toSecsSinceEpoch();
+  p.nonce = QRandomGenerator::global()->generate64();
+  p.eventType = EVENT_IDLE_TRANSITION;
+  p.payload.append(static_cast<char>(state));
+  return encodePacket(p, m_secret);
+}
+
+void RemoteActivityMonitor::sendToAllInterfaces(const QByteArray& bytes,
+                                                const QDateTime& now) {
+  const int port = m_prefs->peerListenPort->get();
+  for (const InterfaceSocket& tup : m_sockets) {
+    if (!tup.socket) continue;
+    const qint64 written =
+        tup.socket->writeDatagram(bytes, tup.subnetBroadcast,
+                                  static_cast<quint16>(port));
+    if (written == bytes.size()) continue;
+    // Rate-limit failure logging (Req 11.5): at most once per interface per 60 s.
+    const QDateTime lastWarn = m_lastSendWarnAt.value(tup.interfaceIndex);
+    if (!lastWarn.isValid() ||
+        lastWarn.secsTo(now) >= kSendFailureWarnIntervalSeconds) {
+      qDebug("Peer fusion: writeDatagram on interface %d returned %lld "
+             "(expected %lld)",
+             tup.interfaceIndex, static_cast<long long>(written),
+             static_cast<long long>(bytes.size()));
+      m_lastSendWarnAt.insert(tup.interfaceIndex, now);
+    }
+  }
 }
 
 void RemoteActivityMonitor::tick(const QDateTime& now) {

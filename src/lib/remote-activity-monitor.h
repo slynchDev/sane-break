@@ -79,6 +79,15 @@ class RemoteActivityMonitor : public QObject {
   // called by the internal timer; exposed so tests can step time.
   void tick(const QDateTime& now);
 
+  // Build an ACTIVITY packet with the given `eventCount` payload and a fresh
+  // nonce, using `now` as the timestamp. Returns an empty QByteArray if the
+  // monitor has no secret loaded (caller should treat as a no-op).
+  QByteArray buildActivityPacket(const QDateTime& now, quint32 eventCount) const;
+
+  // Build an IDLE_TRANSITION packet with `state` ∈ {peer::STATE_IDLE,
+  // peer::STATE_ACTIVE} and a fresh nonce.
+  QByteArray buildIdleTransitionPacket(const QDateTime& now, uint8_t state) const;
+
   QByteArray senderUuid() const { return m_senderUuid; }
   bool anyPeerActive() const { return m_anyPeerActive; }
   int peerCount() const { return m_peers.size(); }
@@ -94,6 +103,13 @@ class RemoteActivityMonitor : public QObject {
  signals:
   void peerActivityChanged(bool anyPeerActive);
 
+ public slots:
+  // Wire targets — public so tests can trigger them deterministically
+  // without spinning up a QEventLoop / sleeping for the timer interval.
+  void onHeartbeatTick();
+  void onLocalIdleStart();
+  void onLocalIdleEnd();
+
  private slots:
   void onDatagramReady();
   void onTimerTick();
@@ -103,6 +119,10 @@ class RemoteActivityMonitor : public QObject {
   void closeSockets();
   bool computeAnyPeerActive(const QDateTime& now) const;
   void recomputeAnyPeerActive(const QDateTime& now);
+  // Write the given bytes to every bound socket's subnet-directed broadcast.
+  // Logs at debug level (at most once per interface per 60s) on transmit
+  // failure to avoid flooding on a downed NIC.
+  void sendToAllInterfaces(const QByteArray& bytes, const QDateTime& now);
 
   struct InterfaceSocket {
     QUdpSocket* socket = nullptr;
@@ -122,6 +142,10 @@ class RemoteActivityMonitor : public QObject {
   QList<InterfaceSocket> m_sockets;
   QSet<int> m_allowedInterfaceIndexes;
   QTimer* m_tickTimer = nullptr;
+  QTimer* m_heartbeatTimer = nullptr;
+  // Per-interface-index last-error timestamp for rate-limited transmit-failure
+  // logging (at most once per interface per 60 s).
+  QHash<int, QDateTime> m_lastSendWarnAt;
 };
 
 }  // namespace peer

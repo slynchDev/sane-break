@@ -101,22 +101,22 @@
 
 ## Phase 4: RemoteActivityMonitor outbound
 
-- [ ] **4.1** Heartbeat timer + ACTIVITY emission
+- [x] **4.1** Heartbeat timer + ACTIVITY emission
   - In `RemoteActivityMonitor::start()`, start a `QTimer` with interval `peerHeartbeatIntervalSeconds * 1000`. On timeout, if the local `SystemIdleTime` reports `!isIdle()`, build an ACTIVITY packet (payload = `event_count` accumulated since last emit; implementation may simply set to `1` if no tick counter exists), encode via `encodePacket`, and for each `InterfaceSocket` tuple from task 3.2 call `socket->writeDatagram(bytes, subnetBroadcast, peerListenPort)`. Using the per-interface subnet-directed broadcast (e.g., `192.168.1.255`) ensures the kernel routes the packet via that specific interface; `QHostAddress::Broadcast` (`255.255.255.255`) would route via the default route regardless of socket binding and defeat the interface allowlist. Reset the counter after emit. No emission when `peerFusionEnabled` is false OR `peerBroadcastInterfaces` empty.
   - _Depends: 3.2, 2.2_
   - _Spec: Requirements 1.1, 1.5, 1.6_
 
-- [ ] **4.2** IDLE_TRANSITION emission on local idle edges
+- [x] **4.2** IDLE_TRANSITION emission on local idle edges
   - Connect the raw local `SystemIdleTime` (injected via 3.1's ctor) `idleStart` → send IDLE_TRANSITION{state=idle}; connect `idleEnd` → send IDLE_TRANSITION{state=active}. Reuses the same encode + per-interface subnet-broadcast path as 4.1. Must be the raw timer, not the `EffectiveIdleTime` facade (per 3.1 feedback-loop note).
   - _Depends: 4.1_
   - _Spec: Requirements 1.3, 1.4_
 
-- [ ] **4.3** Send-failure backoff logging
+- [x] **4.3** Send-failure backoff logging
   - When `writeDatagram` returns -1 for an interface, log at debug level at most once per interface per 60 seconds. Do not disable the socket; keep retrying on subsequent ticks.
   - _Depends: 4.1_
   - _Spec: Requirement 11.5_
 
-- [ ] **4.4** Unit tests for outbound emission
+- [x] **4.4** Unit tests for outbound emission
   - Tests: heartbeat fires at T-second cadence while non-idle; no emission when idle locally; idleStart/idleEnd edges emit exactly one IDLE_TRANSITION each with the right state byte; self-packets round-trip are ignored by the local receiver (regression for Property 4). Verify packet field values via `decodePacket`.
   - _Depends: 4.1, 4.2_
   - _Spec: Requirements 1.1, 1.3, 1.4, 1.7; Property 4_
