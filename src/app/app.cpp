@@ -81,6 +81,19 @@ SaneBreakApp::SaneBreakApp(const AppDependencies& deps, QObject* parent)
             &peer::RemoteActivityMonitor::broadcastMeetingStart);
     connect(this, &AppContext::meetingEnd, m_ram,
             &peer::RemoteActivityMonitor::broadcastMeetingEnd);
+    // Phase 14 consumer: a peer entering a meeting raises a pause request
+    // with PauseReason::PeerMeeting on this host. Reuses the existing
+    // pause machinery (AppStateNormal -> AppStatePaused transition, which
+    // also handles long-pause cycle reset on resume). This is the
+    // "cleanest" consumer option noted in STATUS.md: no new AppState,
+    // no new idle-facade coupling, just a pre-existing reason code.
+    connect(m_ram, &peer::RemoteActivityMonitor::peerMeetingChanged, this,
+            [this](bool inMeeting) {
+              if (inMeeting)
+                onPauseRequest(PauseReason::PeerMeeting);
+              else
+                onResumeRequest(PauseReason::PeerMeeting);
+            });
   }
 
   connect(this, &SaneBreakApp::trayDataUpdated, tray, &StatusTrayWindow::update);

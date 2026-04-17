@@ -11,6 +11,11 @@ enum class PauseReason {
   AppOpen = 1 << 2,
   Sleep = 1 << 3,
   UnknownMonitor = 1 << 4,
+  // Phase 14 — cross-peer meeting awareness. A peer on the LAN has
+  // entered a meeting; suppress local break scheduling until the peer
+  // exits or its MEETING state ages out of the unreachable window.
+  // Cleared on peerMeetingChanged(false).
+  PeerMeeting = 1 << 5,
 };
 Q_DECLARE_FLAGS(PauseReasons, PauseReason)
 Q_DECLARE_OPERATORS_FOR_FLAGS(PauseReasons)
