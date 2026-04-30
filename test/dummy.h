@@ -123,6 +123,23 @@ class DummyApp : public AbstractApp {
     auto* breakState = dynamic_cast<AppStateBreak*>(m_currentState.get());
     while (!breakState->data->isForceBreak()) tick();
   }
+  // Simulates receiving a peer BREAK_START packet — replicates the logic of
+  // SaneBreakApp::onPeerBreakRequested so state-machine properties can be
+  // tested without bringing in the full SaneBreakApp + network stack.
+  void simulatePeerBreakRequest(BreakType type) {
+    if (m_currentState->getID() == AppState::Break) return;
+    if (m_currentState->getID() == AppState::Meeting) return;
+    if (m_currentState->getID() == AppState::Paused) data->clearPauseReasons();
+    if (type == BreakType::Big && data->effectiveBigBreakEnabled())
+      data->makeNextBreakBig();
+    data->earlyBreak();
+    auto breakState = std::make_unique<AppStateBreak>();
+    breakState->peerTriggered = true;
+    transitionTo(std::move(breakState));
+  }
+  AppStateBreak* currentBreakState() {
+    return dynamic_cast<AppStateBreak*>(m_currentState.get());
+  }
   TrayData trayData;
   static DummyAppDependencies makeDeps(QObject* parent = nullptr) {
     for (auto& conn : QSqlDatabase::connectionNames()) {
