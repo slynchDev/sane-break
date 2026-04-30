@@ -186,6 +186,10 @@ void AppStatePaused::onMenuAction(AppContext* app, MenuAction action) {
   }
 }
 
+// peerTriggered is read by SaneBreakApp::SaneBreakApp to gate the outbound
+// BREAK_START broadcast. All other break behavior — phase transitions,
+// force-break exits, DB spans, sounds, and finishAndStartNextCycle — is
+// identical for locally-initiated and peer-triggered breaks.
 void AppStateBreak::enter(AppContext* app) {
   app->openCurrentSpan(
       "break", {{"type", app->data->breakType() == BreakType::Big ? "big" : "small"}});

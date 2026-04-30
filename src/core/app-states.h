@@ -169,6 +169,12 @@ class AppStateBreak : public AppState {
   BreaksDataInit dataInit(AppContext*);
   std::unique_ptr<BreaksData> data;
 
+  // True when this break was entered in response to a peer BREAK_START packet.
+  // Read by SaneBreakApp to gate the outbound broadcast: only locally-initiated
+  // breaks re-broadcast; peer-triggered breaks must not, or a break loop forms.
+  // Has no effect on any other break behavior.
+  bool peerTriggered = false;
+
  protected:
   std::unique_ptr<BreakPhase> m_currentPhase;
 };

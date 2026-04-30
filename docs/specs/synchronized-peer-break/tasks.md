@@ -104,7 +104,7 @@
 
 ## Phase 3: AppStateBreak peerTriggered flag
 
-- [ ] **3.1** Add `peerTriggered` field to `AppStateBreak`
+- [x] **3.1** Add `peerTriggered` field to `AppStateBreak`
   - In `src/core/app-states.h::AppStateBreak`, add:
     ```cpp
     bool peerTriggered = false;
@@ -112,7 +112,7 @@
     as a public member (siblings with `data`). Default-initialized to `false` so locally-constructed `AppStateBreak` instances behave exactly as today. Peer-triggered construction (task 4.2) sets it to `true`.
   - _Spec: Requirement 3.1, Glossary (Local_Break, Peer_Break)_
 
-- [ ] **3.2** Verify `peerTriggered` does not alter break behavior
+- [x] **3.2** Verify `peerTriggered` does not alter break behavior
   - Add a comment block in `src/core/app-states.cpp` immediately above `AppStateBreak::enter` documenting that `peerTriggered` is read ONLY by `SaneBreakApp` to gate the broadcast path, and that all break-state behavior (phase transitions, force-break, sounds, DB spans, end processing) is independent of this flag.
   - No code changes — this task exists to anchor the invariant during code review.
   - _Depends: 3.1_
