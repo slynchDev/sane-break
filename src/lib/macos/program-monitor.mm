@@ -19,3 +19,8 @@ const QStringList RunningProgramsMonitor::runningPrograms() {
   }
   return apps;
 }
+
+void RunningProgramsMonitor::startAudioProgramsQuery() {
+  // TODO: Implement macOS audio stream detection via CoreAudio
+  m_lastAudioPrograms.clear();
+}

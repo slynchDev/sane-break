@@ -53,6 +53,8 @@
 #include "core/flags.h"
 #include "core/preferences.h"
 #include "lib/auto-start.h"
+#include "lib/peer-secret.h"
+#include "lib/remote-activity-monitor.h"
 #include "lib/screen-monitor.h"
 #include "ui_pref-window.h"
 
@@ -393,10 +395,14 @@ PreferenceWindow::PreferenceWindow(SanePreferences* preferences, QWidget* parent
 #ifdef LINUX_DIST_FLATPAK
   ui->programList->setHidden(true);
   ui->programListLabel->setHidden(true);
+  ui->autoMeetingOnAppCheck->setHidden(true);
 #else
   controllers->add(PrefGroup::Pause,
                    new PrefController<QPlainTextEdit, QStringList>(
                        ui->programList, preferences->programsToMonitor));
+  controllers->add(PrefGroup::Pause,
+                   new PrefController<QCheckBox, bool>(
+                       ui->autoMeetingOnAppCheck, preferences->autoMeetingOnApp));
 #endif
 
   auto pauseOnUnknownMonitorController = controllers->add(
@@ -427,6 +433,57 @@ PreferenceWindow::PreferenceWindow(SanePreferences* preferences, QWidget* parent
   });
   connect(ui->removeKnownMonitorButton, &QPushButton::pressed, this,
           [this]() { qDeleteAll(ui->knownMonitorsList->selectedItems()); });
+
+  /***************************************************************************
+   *                                                                         *
+   *                            Peer fusion group                            *
+   *                                                                         *
+   ****************************************************************************/
+  controllers->add(PrefGroup::Pause,
+                   new PrefController<QCheckBox, bool>(
+                       ui->peerFusionEnabledCheck, preferences->peerFusionEnabled));
+  controllers->add(PrefGroup::Pause,
+                   new PrefController<QSpinBox, int>(
+                       ui->peerListenPortBox, preferences->peerListenPort));
+  controllers->add(PrefGroup::Pause, new PrefController<QSpinBox, int>(
+                                         ui->peerActiveWindowBox,
+                                         preferences->peerActiveWindowSeconds));
+  controllers->add(
+      PrefGroup::Pause,
+      new PrefController<QSpinBox, int>(ui->peerUnreachableWindowBox,
+                                        preferences->peerUnreachableWindowSeconds));
+  controllers->add(
+      PrefGroup::Pause,
+      new PrefController<QSpinBox, int>(ui->peerHeartbeatIntervalBox,
+                                        preferences->peerHeartbeatIntervalSeconds));
+  controllers->add(PrefGroup::Pause,
+                   new PrefController<QPlainTextEdit, QStringList>(
+                       ui->peerBroadcastInterfacesEdit,
+                       preferences->peerBroadcastInterfaces));
+  ui->peerSecretPathLabel->setText(
+      tr("Secret file: %1").arg(peer::resolvedPeerSecretPath()));
+
+  // Live peer indicator — refresh every 2 s from the RemoteActivityMonitor.
+  // Populated lazily via setRemoteActivityMonitor(). When m_ram is null the
+  // timer no-ops; when the pref window is hidden Qt pauses the timer.
+  auto* peerIndicatorTimer = new QTimer(this);
+  peerIndicatorTimer->setInterval(2'000);
+  connect(peerIndicatorTimer, &QTimer::timeout, this, [this]() {
+    refreshPeerStatusList();
+  });
+  peerIndicatorTimer->start();
+  auto syncPeerGroupEnabled = [this]() {
+    const bool on = ui->peerFusionEnabledCheck->isChecked();
+    ui->peerListenPortBox->setEnabled(on);
+    ui->peerActiveWindowBox->setEnabled(on);
+    ui->peerUnreachableWindowBox->setEnabled(on);
+    ui->peerHeartbeatIntervalBox->setEnabled(on);
+    ui->peerBroadcastInterfacesEdit->setEnabled(on);
+    ui->peerStatusList->setVisible(on);
+  };
+  connect(ui->peerFusionEnabledCheck, &QCheckBox::toggled, this,
+          syncPeerGroupEnabled);
+  syncPeerGroupEnabled();
 
   /***************************************************************************
    *                                                                         *
@@ -714,5 +771,34 @@ void PreferenceWindow::forceThemeUpdate() {
     button->style()->unpolish(button);
     button->style()->polish(button);
     button->update();
+  }
+}
+
+void PreferenceWindow::setRemoteActivityMonitor(peer::RemoteActivityMonitor* ram) {
+  m_ram = ram;
+  refreshPeerStatusList();
+}
+
+void PreferenceWindow::refreshPeerStatusList() {
+  ui->peerStatusList->clear();
+  if (!m_ram) return;
+  if (!preferences->peerFusionEnabled->get()) return;
+  const QDateTime now = QDateTime::currentDateTimeUtc();
+  const QList<peer::PeerStatus> statuses = m_ram->peerStatuses(now);
+  if (statuses.isEmpty()) {
+    ui->peerStatusList->addItem(tr("No peers seen yet"));
+    return;
+  }
+  for (const peer::PeerStatus& s : statuses) {
+    const QDateTime seen = s.isActive ? s.lastSeenActive : s.lastSeenIdle;
+    const int secsAgo = seen.isValid() ? seen.secsTo(now) : -1;
+    const QString state = s.isActive ? tr("active") : tr("idle");
+    QString line;
+    if (secsAgo < 0) {
+      line = tr("%1 — %2 (never seen)").arg(s.hostLabel, state);
+    } else {
+      line = tr("%1 — %2 %3s ago").arg(s.hostLabel, state).arg(secsAgo);
+    }
+    ui->peerStatusList->addItem(line);
   }
 }

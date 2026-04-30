@@ -30,6 +30,8 @@ QString pauseReasonName(PauseReason reason) {
       return "sleep";
     case PauseReason::UnknownMonitor:
       return "unknown-monitor";
+    case PauseReason::PeerMeeting:
+      return "peer-meeting";
   }
   return "unknown";
 }
@@ -293,9 +295,14 @@ void AppStatePaused::onMenuAction(AppContext* app, MenuAction action) {
   }
 }
 
+// peerTriggered is read by SaneBreakApp::SaneBreakApp to gate the outbound
+// BREAK_START broadcast. All other break behavior — phase transitions,
+// force-break exits, DB spans, sounds, and finishAndStartNextCycle — is
+// identical for locally-initiated and peer-triggered breaks.
 void AppStateBreak::enter(AppContext* app) {
   app->openCurrentSpan(
       "break", {{"type", app->data->breakType() == BreakType::Big ? "big" : "small"}});
+  emit app->breakStart();
   data = std::make_unique<BreaksData>(dataInit(app));
   // On focus entry break, exhaust force break exits so the exit button is hidden
   if (app->data->focus().isActive() && !app->data->focus().entryBreakDone()) {
@@ -324,6 +331,7 @@ void AppStateBreak::exit(AppContext* app) {
   app->closeCurrentSpan({{"normal-exit", (data->remainingSeconds() <= 0)}});
   if (!m_preserveBreakWindowsOnExit) app->breakWindows->destroy();
   m_preserveBreakWindowsOnExit = false;
+  emit app->breakEnd();
 }
 void AppStateBreak::tick(AppContext* app) { m_currentPhase->tick(app, this); }
 void AppStateBreak::onIdleStart(AppContext* app) {
@@ -507,6 +515,15 @@ bool AppStatePostBreakIdle::onSleepEnd(AppContext* app, int sleptSeconds) {
   return true;
 }
 
+static void openMeetingSpan(AppContext* app) {
+  bool indefinite = app->data->meeting().isIndefinite();
+  app->openCurrentSpan(
+      "meeting",
+      {{"indefinite", indefinite},
+       {"scheduledSeconds", indefinite ? 0 : app->data->meeting().totalSeconds()},
+       {"reason", app->data->meeting().reason()}});
+}
+
 void AppStateMeeting::enter(AppContext* app) {
   app->openCurrentSpan("meeting",
                        {{"scheduledSeconds", app->data->meeting().totalSeconds()},
@@ -514,15 +531,21 @@ void AppStateMeeting::enter(AppContext* app) {
   app->data->schedule().resetSecondsToNextBreak(app->data->currentBreakConfig());
   app->idleTimer->setWatchAccuracy(5000);
   app->idleTimer->setMinIdleTime(app->preferences->pauseOnIdleFor->get() * 1000);
+  emit app->meetingStart();
 }
 
 void AppStateMeeting::exit(AppContext* app) {
   app->closeCurrentSpan();
   app->data->meeting().clear();
   app->meetingPrompt->closeEndPrompt();
+  emit app->meetingEnd();
 }
 
 void AppStateMeeting::tick(AppContext* app) {
+  if (app->data->meeting().isIndefinite()) {
+    app->data->meeting().tickElapsed();
+    return;
+  }
   if (app->data->meeting().secondsRemaining() > 0) app->data->meeting().tickRemaining();
   int remaining = app->data->meeting().secondsRemaining();
   if (remaining > 0 && remaining <= 60) {
@@ -538,12 +561,14 @@ void AppStateMeeting::tick(AppContext* app) {
 void AppStateMeeting::onMenuAction(AppContext* app, MenuAction action) {
   if (std::get_if<Action::EndMeetingBreakNow>(&action)) {
     app->db->logEvent("meeting::end", {{"next-break", 0}});
-    if (app->data->currentBreakConfig().bigEnabled) app->data->makeNextBreakBig();
+    if (app->data->currentBreakConfig().bigEnabled && !app->data->meeting().isIndefinite())
+      app->data->makeNextBreakBig();
     app->data->schedule().earlyBreak();
     app->transitionTo(std::make_unique<AppStateBreak>());
   } else if (auto* a = std::get_if<Action::EndMeetingBreakLater>(&action)) {
     app->db->logEvent("meeting::end", {{"next-break", a->seconds}});
-    if (app->data->currentBreakConfig().bigEnabled) app->data->makeNextBreakBig();
+    if (app->data->currentBreakConfig().bigEnabled && !app->data->meeting().isIndefinite())
+      app->data->makeNextBreakBig();
     app->data->schedule().setSecondsToNextBreak(a->seconds);
     app->transitionTo(std::make_unique<AppStateNormal>());
   } else if (auto* a = std::get_if<Action::ExtendMeeting>(&action)) {
@@ -553,6 +578,10 @@ void AppStateMeeting::onMenuAction(AppContext* app, MenuAction action) {
   }
 }
 bool AppStateMeeting::onSleepEnd(AppContext* app, int sleptSeconds) {
+  if (app->data->meeting().isIndefinite()) {
+    openMeetingSpan(app);
+    return true;
+  }
   BreakConfig config = app->data->currentBreakConfig();
   int breakDuration = config.bigEnabled ? config.bigFor : config.smallFor;
   int skipIfSleptFor = app->data->meeting().secondsRemaining() + breakDuration;
@@ -563,10 +592,7 @@ bool AppStateMeeting::onSleepEnd(AppContext* app, int sleptSeconds) {
     app->transitionTo(std::make_unique<AppStateNormal>());
     return true;
   }
-  // Short sleep: reopen meeting span at current time
-  app->openCurrentSpan("meeting",
-                       {{"scheduledSeconds", app->data->meeting().totalSeconds()},
-                        {"reason", app->data->meeting().reason()}});
+  openMeetingSpan(app);
   app->data->meeting().subtractRemaining(sleptSeconds);
   return true;
 }

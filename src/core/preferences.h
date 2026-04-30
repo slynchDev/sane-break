@@ -134,6 +134,7 @@ class SanePreferences : public QObject {
   Setting<int>* resetCycleAfterPause;
   Setting<bool>* pauseOnBattery;
   Setting<QStringList>* programsToMonitor;
+  Setting<bool>* autoMeetingOnApp;
   Setting<bool>* pauseOnUnknownMonitor;
   Setting<QStringList>* knownMonitors;
 
@@ -146,4 +147,12 @@ class SanePreferences : public QObject {
   Setting<bool>* quickBreak;
   Setting<QString>* language;
   Setting<bool>* autoStart;
+
+  // Cross-machine activity fusion (peer broadcast)
+  Setting<bool>* peerFusionEnabled;
+  Setting<int>* peerListenPort;
+  Setting<int>* peerActiveWindowSeconds;
+  Setting<int>* peerUnreachableWindowSeconds;
+  Setting<int>* peerHeartbeatIntervalSeconds;
+  Setting<QStringList>* peerBroadcastInterfaces;
 };

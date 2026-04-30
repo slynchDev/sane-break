@@ -48,6 +48,38 @@ class TestApp : public QObject {
     QCOMPARE(app.trayData.smallBreaksBeforeBigBreak,
              deps.preferences->bigAfter->get() - 1);
   }
+  // Property 7: peer-fusion-disabled sessions observe byte-identical
+  // behavior to the pre-fusion baseline. Enforced implicitly by every
+  // other test in this file running with peerFusionEnabled=false and no
+  // RemoteActivityMonitor; this explicit assertion pins the default.
+  void peer_fusion_disabled_by_default() {
+    QCOMPARE(deps.preferences->peerFusionEnabled->get(), false);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    // Baseline tray state holds — toggling the preference at construction
+    // time must not alter any of the observable fields the rest of the
+    // suite verifies.
+    QCOMPARE(app.trayData.secondsToNextBreak, deps.preferences->smallEvery->get());
+  }
+  // Property 7 pin: toggling peerFusionEnabled on an AbstractApp build
+  // (DummyApp, no peer wiring, no RemoteActivityMonitor) must not perturb
+  // the countdown or any tray field. SaneBreakApp wires slots to this
+  // preference conditionally on a non-null RemoteActivityMonitor (see
+  // SaneBreakApp::SaneBreakApp) — this test guards the DummyApp path, which
+  // intentionally has no such wiring and must remain byte-identical to the
+  // pre-fusion baseline regardless of preference churn. SaneBreakApp-level
+  // toggle coverage lives in Phase 13's property-test suite.
+  void peer_fusion_toggle_is_inert_in_baseline_app() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    const int baseline = deps.preferences->smallEvery->get();
+    deps.preferences->peerFusionEnabled->set(true);
+    deps.preferences->peerFusionEnabled->set(false);
+    deps.preferences->peerFusionEnabled->set(true);
+    QCOMPARE(app.trayData.secondsToNextBreak, baseline);
+    emit deps.countDownTimer->timeout();
+    QCOMPARE(app.trayData.secondsToNextBreak, baseline - 1);
+  }
   void tick() {
     NiceMock<DummyApp> app(deps);
     app.start();
@@ -902,6 +934,145 @@ class TestApp : public QObject {
     app.advance(50);
     QCOMPARE(app.trayData.meetingSecondsRemaining, 50);
   }
+  // Indefinite meeting enters Meeting state with elapsed=0 and no countdown
+  void indefinite_meeting_start_state() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    app.startIndefiniteMeeting("auto-detected");
+
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QVERIFY(app.trayData.isInMeeting);
+    QVERIFY(app.trayData.isMeetingIndefinite);
+    QCOMPARE(app.trayData.meetingSecondsRemaining, 0);
+    QCOMPARE(app.trayData.meetingTotalSeconds, 0);
+    QCOMPARE(app.trayData.meetingReason, QString("auto-detected"));
+  }
+  // Indefinite meeting tick counts up elapsed and never auto-ends
+  void indefinite_meeting_tick_elapsed() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    app.startIndefiniteMeeting("auto-detected");
+    app.advance(120);
+
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QCOMPARE(app.trayData.meetingTotalSeconds, 120);
+    QCOMPARE(app.trayData.meetingSecondsRemaining, 0);
+
+    app.advance(3600);
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QCOMPARE(app.trayData.meetingTotalSeconds, 3720);
+  }
+  // Ending indefinite meeting with BreakNow does not upgrade to big break
+  void indefinite_meeting_end_break_now_no_big_break() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    int beforeSmallBreaks = app.trayData.smallBreaksBeforeBigBreak;
+
+    app.startIndefiniteMeeting("auto-detected");
+    app.endMeetingBreakNow();
+
+    QVERIFY(app.trayData.isBreaking);
+    QVERIFY(!app.trayData.isInMeeting);
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak, beforeSmallBreaks);
+  }
+  // Ending indefinite meeting with BreakLater does not upgrade to big break
+  void indefinite_meeting_end_break_later_no_big_break() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    int beforeSmallBreaks = app.trayData.smallBreaksBeforeBigBreak;
+
+    app.startIndefiniteMeeting("auto-detected");
+    app.endMeetingBreakLater(300);
+
+    QVERIFY(!app.trayData.isInMeeting);
+    QVERIFY(!app.trayData.isBreaking);
+    QCOMPARE(app.trayData.secondsToNextBreak, 300);
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak, beforeSmallBreaks);
+  }
+  // Sleep during indefinite meeting stays in meeting; span reopened
+  void indefinite_meeting_survives_sleep() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    app.startIndefiniteMeeting("auto-detected");
+    app.advance(60);
+
+    emit deps.systemMonitor->sleepEnded(1800);
+
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QVERIFY(app.trayData.isInMeeting);
+    QVERIFY(app.trayData.isMeetingIndefinite);
+  }
+  // Starting indefinite meeting during focus mode ends focus
+  void indefinite_meeting_ends_focus() {
+    deps.preferences->focusSmallEvery->set(600);
+    deps.preferences->focusSmallFor->set(10);
+    deps.preferences->focusBigBreakEnabled->set(false);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    app.startFocus(3, "deep work");
+    app.advanceToBreakEnd();
+    QVERIFY(app.trayData.isFocusMode);
+
+    app.startIndefiniteMeeting("auto-detected");
+
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QVERIFY(!app.trayData.isFocusMode);
+    QVERIFY(app.trayData.isMeetingIndefinite);
+  }
+  // meetingAppStarted signal enters indefinite meeting when autoMeetingOnApp is true
+  void auto_meeting_started_via_signal() {
+    deps.preferences->autoMeetingOnApp->set(true);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    emit deps.systemMonitor->meetingAppStarted();
+
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QVERIFY(app.trayData.isInMeeting);
+    QVERIFY(app.trayData.isMeetingIndefinite);
+  }
+  // meetingAppStarted signal is ignored when autoMeetingOnApp is false
+  void auto_meeting_ignored_when_disabled() {
+    deps.preferences->autoMeetingOnApp->set(false);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    emit deps.systemMonitor->meetingAppStarted();
+
+    QCOMPARE(app.currentState(), AppState::Normal);
+    QVERIFY(!app.trayData.isInMeeting);
+  }
+  // meetingAppStopped signal ends an active indefinite meeting
+  void auto_meeting_stopped_ends_meeting() {
+    deps.preferences->autoMeetingOnApp->set(true);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    emit deps.systemMonitor->meetingAppStarted();
+    QVERIFY(app.trayData.isMeetingIndefinite);
+
+    emit deps.systemMonitor->meetingAppStopped();
+
+    QCOMPARE(app.currentState(), AppState::Normal);
+    QVERIFY(!app.trayData.isInMeeting);
+    QCOMPARE(app.trayData.secondsToNextBreak, deps.preferences->smallEvery->get());
+  }
+  // meetingAppStopped signal does NOT end a manual finite meeting
+  void auto_meeting_stopped_ignored_during_finite() {
+    deps.preferences->autoMeetingOnApp->set(true);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    app.startMeeting(1800, "manual standup");
+    QVERIFY(!app.trayData.isMeetingIndefinite);
+
+    emit deps.systemMonitor->meetingAppStopped();
+
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QVERIFY(app.trayData.isInMeeting);
+  }
   // Sleep end should not change the pause state
   void sleep_end_while_idle_paused() {
     NiceMock<DummyApp> app(deps);
@@ -1409,6 +1580,177 @@ class TestApp : public QObject {
     QCOMPARE(app.trayData.meetingSecondsRemaining, 1400);
     QVERIFY(app.trayData.isInMeeting);
     QVERIFY(Mock::VerifyAndClearExpectations(deps.meetingPrompt));
+  }
+
+  // ---- Phase 6: Synchronized peer break property tests ----
+
+  // Property 1a: locally-initiated break has peerTriggered=false — eligible to broadcast.
+  void peer_local_break_has_peerTriggered_false() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    app.advance(app.trayData.secondsToNextBreak);
+    auto* bs = app.currentBreakState();
+    QVERIFY(bs != nullptr);
+    QCOMPARE(bs->peerTriggered, false);
+  }
+
+  // Property 1b: peer-triggered break has peerTriggered=true — suppresses re-broadcast,
+  // preventing A→B→A break loops (Requirement 3.1, 3.2).
+  void peer_triggered_break_has_peerTriggered_true() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    app.simulatePeerBreakRequest(BreakType::Small);
+    auto* bs = app.currentBreakState();
+    QVERIFY(bs != nullptr);
+    QCOMPARE(bs->peerTriggered, true);
+  }
+
+  // Property 2: peer BREAK_START from Normal transitions to Break (Requirement 2.5, 2.6).
+  void peer_break_request_from_normal_enters_break() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    QCOMPARE(app.currentState(), AppState::Normal);
+    app.simulatePeerBreakRequest(BreakType::Small);
+    QCOMPARE(app.currentState(), AppState::Break);
+    QVERIFY(app.trayData.isBreaking);
+    QVERIFY(app.currentBreakState()->peerTriggered);
+  }
+
+  // Property 2: peer BREAK_START of type Big is honored when big breaks enabled.
+  void peer_break_request_big_type_honored() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    EXPECT_CALL(*deps.breakWindows, create(BreakType::Big, _, _, _)).Times(1);
+    app.simulatePeerBreakRequest(BreakType::Big);
+    QVERIFY(Mock::VerifyAndClearExpectations(deps.breakWindows));
+    QCOMPARE(app.currentState(), AppState::Break);
+    QVERIFY(app.currentBreakState()->peerTriggered);
+  }
+
+  // Property 2: big peer break falls back to small when big breaks disabled locally
+  // (Requirement 2.7).
+  void peer_break_request_big_falls_back_when_disabled() {
+    deps.preferences->bigBreakEnabled->set(false);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    EXPECT_CALL(*deps.breakWindows, create(BreakType::Small, _, _, _)).Times(1);
+    app.simulatePeerBreakRequest(BreakType::Big);
+    QVERIFY(Mock::VerifyAndClearExpectations(deps.breakWindows));
+    QCOMPARE(app.currentState(), AppState::Break);
+  }
+
+  // Property 3: peer break zeroes the local countdown so the tray shows no stale
+  // "next break in N min" text during the transition (Requirement 4.3).
+  void peer_break_request_resets_local_countdown() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    app.advance(30);
+    app.simulatePeerBreakRequest(BreakType::Small);
+    QCOMPARE(app.trayData.secondsToNextBreak, 0);
+    QVERIFY(app.trayData.isBreaking);
+  }
+
+  // Property 3: after completing a peer-triggered break the countdown resets to the
+  // full interval, so both machines restart their cycle in sync.
+  void peer_break_request_timer_resyncs_on_completion() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    app.advance(30);
+    app.simulatePeerBreakRequest(BreakType::Small);
+    app.advanceToBreakEnd();
+    QCOMPARE(app.trayData.secondsToNextBreak, deps.preferences->smallEvery->get());
+  }
+
+  // Property 4: meeting state blocks peer break — meetings take priority
+  // (Requirement 2.4).
+  void peer_break_request_during_meeting_ignored() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    app.startMeeting(3600, "standup");
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    app.simulatePeerBreakRequest(BreakType::Small);
+    QCOMPARE(app.currentState(), AppState::Meeting);
+    QVERIFY(!app.trayData.isBreaking);
+  }
+
+  // Property 5: peer-triggered break completes via the same phase sequence as a
+  // locally-initiated break (Requirement 3.3).
+  void peer_triggered_break_completes_like_local_break() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    int smallEvery = deps.preferences->smallEvery->get();
+    app.simulatePeerBreakRequest(BreakType::Small);
+    app.advanceToBreakEnd();
+    QVERIFY(!app.trayData.isBreaking);
+    QCOMPARE(app.trayData.secondsToNextBreak, smallEvery);
+  }
+
+  // Property 6: already-breaking is idempotent — peer BREAK_START is silently dropped,
+  // no re-entry or duplicate span (Requirement 2.3).
+  void peer_break_request_during_break_ignored() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    app.breakNow();
+    QVERIFY(app.trayData.isBreaking);
+    int spanBefore = app.currentSpanId;
+    app.simulatePeerBreakRequest(BreakType::Small);
+    QCOMPARE(app.currentState(), AppState::Break);
+    QCOMPARE(app.currentSpanId, spanBefore);
+  }
+
+  // Requirement 2.5: Paused state is cleared before peer-triggered Break entry.
+  void peer_break_request_from_paused_clears_and_breaks() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    deps.idleTimer->setIdle(true);
+    QCOMPARE(app.currentState(), AppState::Paused);
+    QCOMPARE(app.trayData.pauseReasons, PauseReason::Idle);
+    app.simulatePeerBreakRequest(BreakType::Small);
+    QCOMPARE(app.currentState(), AppState::Break);
+    QCOMPARE(app.trayData.pauseReasons.toInt(), 0);
+    QVERIFY(app.currentBreakState()->peerTriggered);
+  }
+
+  // Requirement 5.1: peer break overrides postpone — aggregate typing is the signal,
+  // postponing on one machine cannot negate it.
+  void peer_break_request_overrides_local_postpone() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    app.postpone(300);
+    QVERIFY(app.trayData.isPostponing);
+    app.simulatePeerBreakRequest(BreakType::Small);
+    QCOMPARE(app.currentState(), AppState::Break);
+    QVERIFY(app.currentBreakState()->peerTriggered);
+  }
+
+  // Requirement 5.2: peer break fires through focus cycles; cycle count decrements
+  // on break completion the same as a locally-initiated break would.
+  void peer_break_request_fires_during_focus() {
+    deps.preferences->focusSmallEvery->set(600);
+    deps.preferences->focusSmallFor->set(10);
+    deps.preferences->focusBigBreakEnabled->set(false);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    app.startFocus(3, "deep work");
+    app.advanceToBreakEnd();  // finish entry break; cycles still 3
+    QCOMPARE(app.trayData.focusCyclesRemaining, 3);
+    app.simulatePeerBreakRequest(BreakType::Small);
+    QCOMPARE(app.currentState(), AppState::Break);
+    app.advanceToBreakEnd();
+    QVERIFY(app.trayData.isFocusMode);
+    QCOMPARE(app.trayData.focusCyclesRemaining, 2);
+  }
+
+  // Property 8: postpone during a peer-triggered break is local-only — uses the same
+  // code path as postpone during a locally-initiated break (Requirement 5.4).
+  void postpone_during_peer_break_is_local_only() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    app.simulatePeerBreakRequest(BreakType::Small);
+    QVERIFY(app.trayData.isBreaking);
+    app.postpone(100);
+    QVERIFY(!app.trayData.isBreaking);
+    QCOMPARE(app.trayData.secondsToNextBreak, 100);
   }
 };
 

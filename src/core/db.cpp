@@ -7,6 +7,7 @@
 #include <QDate>
 #include <QDateTime>
 #include <QDir>
+#include <QHostInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLatin1String>
@@ -45,26 +46,30 @@ QString BreakDatabase::dbPath() {
 }
 
 QSqlError BreakDatabase::ensureDb() {
-  if (m_db.isOpen()) {
-    return QSqlError();
-  }
+  // Idempotent — create+migrate runs once per BreakDatabase instance. The
+  // flag guards correctness when the QSqlDatabase handed in was already
+  // opened by the caller (some tests pre-open the in-memory DB).
+  if (m_initialized) return QSqlError();
 
-  QString path = dbPath();
-  if (path.isEmpty()) {
-    QSqlError error("Database directory creation failed",
-                    "Could not create database directory", QSqlError::ConnectionError);
-    qWarning() << "Database directory creation failed:" << error.text();
-    return error;
-  }
+  if (!m_db.isOpen()) {
+    QString path = dbPath();
+    if (path.isEmpty()) {
+      QSqlError error("Database directory creation failed",
+                      "Could not create database directory",
+                      QSqlError::ConnectionError);
+      qWarning() << "Database directory creation failed:" << error.text();
+      return error;
+    }
 
-  if (m_db.databaseName().isEmpty()) {
-    m_db.setDatabaseName(path);
-  }
+    if (m_db.databaseName().isEmpty()) {
+      m_db.setDatabaseName(path);
+    }
 
-  if (!m_db.open()) {
-    QSqlError error = m_db.lastError();
-    qWarning() << "Failed to open database:" << error.text();
-    return error;
+    if (!m_db.open()) {
+      QSqlError error = m_db.lastError();
+      qWarning() << "Failed to open database:" << error.text();
+      return error;
+    }
   }
 
   static const auto createEventsTable = QLatin1String(
@@ -90,7 +95,8 @@ QSqlError BreakDatabase::ensureDb() {
             type TEXT NOT NULL,
             started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             ended_at TIMESTAMP,
-            data TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data))
+            data TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)),
+            host TEXT
         )
     )");
   if (!query.exec(createSpansTable)) {
@@ -99,13 +105,80 @@ QSqlError BreakDatabase::ensureDb() {
     return error;
   }
 
+  // Apply incremental migrations. A fresh DB has user_version = 0 (SQLite
+  // default) even after the CREATE TABLE IF NOT EXISTS above; migrate()
+  // stamps it to 2 for fresh installs after a no-op ALTER check.
+  QSqlError migErr = migrate();
+  if (migErr.type() != QSqlError::NoError) {
+    m_readOnlyMode = true;
+    emit initializationFailed(migErr.text());
+    return migErr;
+  }
+
+  m_initialized = true;
+  return QSqlError();
+}
+
+QSqlError BreakDatabase::migrate() {
+  QSqlQuery versionQuery(m_db);
+  if (!versionQuery.exec("PRAGMA user_version")) {
+    return versionQuery.lastError();
+  }
+  int version = 0;
+  if (versionQuery.next()) {
+    version = versionQuery.value(0).toInt();
+  }
+
+  if (version >= 2) return QSqlError();  // Up-to-date — idempotent no-op.
+
+  // v0 → v2: add `host` column and backfill rows missing a host value
+  // with the local machine's hostname. SQLite's ALTER TABLE ADD COLUMN
+  // accepts only constant literals for DEFAULT, so the backfill is a
+  // separate UPDATE bound to QHostInfo::localHostName() at runtime.
+  if (!m_db.transaction()) {
+    return m_db.lastError();
+  }
+
+  QSqlQuery migQuery(m_db);
+
+  // CREATE TABLE above already includes `host TEXT` for fresh installs;
+  // this ALTER is only needed on older schemas. Detect by attempting and
+  // treating a duplicate-column error as success.
+  if (!migQuery.exec("ALTER TABLE spans ADD COLUMN host TEXT")) {
+    const QString text = migQuery.lastError().text();
+    const bool duplicateColumn = text.contains("duplicate column",
+                                               Qt::CaseInsensitive);
+    if (!duplicateColumn) {
+      m_db.rollback();
+      return migQuery.lastError();
+    }
+  }
+
+  QSqlQuery backfill(m_db);
+  backfill.prepare("UPDATE spans SET host = ? WHERE host IS NULL");
+  backfill.addBindValue(QHostInfo::localHostName());
+  if (!backfill.exec()) {
+    m_db.rollback();
+    return backfill.lastError();
+  }
+
+  QSqlQuery stamp(m_db);
+  if (!stamp.exec("PRAGMA user_version = 2")) {
+    m_db.rollback();
+    return stamp.lastError();
+  }
+
+  if (!m_db.commit()) {
+    m_db.rollback();
+    return m_db.lastError();
+  }
   return QSqlError();
 }
 
 QSqlError BreakDatabase::logEvent(const QString& eventType,
                                   const QJsonObject& eventData) {
   auto err = ensureDb();
-  if (err.type() != QSqlError::NoError) {
+  if (err.type() != QSqlError::NoError || m_readOnlyMode) {
     qWarning() << "Database not available, skipping event log:" << eventType;
     return err;
   }
@@ -129,21 +202,25 @@ QSqlError BreakDatabase::logEvent(const QString& eventType,
 int BreakDatabase::openSpan(const QString& type, const QJsonObject& data,
                             const QDateTime& startTime) {
   auto err = ensureDb();
-  if (err.type() != QSqlError::NoError) {
+  if (err.type() != QSqlError::NoError || m_readOnlyMode) {
     qWarning() << "Database not available, skipping openSpan:" << type;
     return -1;
   }
 
+  const QString host = QHostInfo::localHostName();
   QSqlQuery query(m_db);
   if (startTime.isValid()) {
-    query.prepare("INSERT INTO spans (type, started_at, data) VALUES (?, ?, ?)");
+    query.prepare(
+        "INSERT INTO spans (type, started_at, data, host) VALUES (?, ?, ?, ?)");
     query.addBindValue(type);
     query.addBindValue(startTime.toUTC().toString(Qt::ISODate));
     query.addBindValue(QJsonDocument(data).toJson(QJsonDocument::Compact));
+    query.addBindValue(host);
   } else {
-    query.prepare("INSERT INTO spans (type, data) VALUES (?, ?)");
+    query.prepare("INSERT INTO spans (type, data, host) VALUES (?, ?, ?)");
     query.addBindValue(type);
     query.addBindValue(QJsonDocument(data).toJson(QJsonDocument::Compact));
+    query.addBindValue(host);
   }
 
   if (!query.exec()) {
@@ -159,7 +236,7 @@ void BreakDatabase::closeSpan(int spanId, const QJsonObject& extraData,
   if (spanId < 0) return;
 
   auto err = ensureDb();
-  if (err.type() != QSqlError::NoError) {
+  if (err.type() != QSqlError::NoError || m_readOnlyMode) {
     qWarning() << "Database not available, skipping closeSpan:" << spanId;
     return;
   }
@@ -370,6 +447,52 @@ QList<DailyUsageStats> BreakDatabase::queryDailyUsageStats(QDate from, QDate to)
   for (auto it = daysWithUsage.constBegin(); it != daysWithUsage.constEnd(); ++it) {
     results.append(
         {it.key(), trackedByDay.value(it.key(), 0), pausedByDay.value(it.key(), 0)});
+  }
+  return results;
+}
+
+// Returns per-day, per-host active seconds (normal + meeting spans)
+// for the given date range [from, to]. Hosts without recorded spans in
+// the range are omitted. Spans crossing midnight are split across days
+// the same way queryDailyUsageStats does.
+QList<HostUsageStats> BreakDatabase::queryDailyUsageByHost(QDate from,
+                                                           QDate to) {
+  QList<HostUsageStats> results;
+  auto err = ensureDb();
+  if (err.type() != QSqlError::NoError) return results;
+
+  QSqlQuery query(m_db);
+  query.prepare(R"(
+    SELECT datetime(started_at, 'localtime'),
+           datetime(COALESCE(ended_at, CURRENT_TIMESTAMP), 'localtime'),
+           COALESCE(host, '')
+    FROM spans
+    WHERE type IN ('normal', 'meeting')
+      AND (ended_at IS NOT NULL OR id = (SELECT MAX(id) FROM spans WHERE ended_at IS NULL))
+      AND date(started_at, 'localtime') BETWEEN ? AND ?
+  )");
+  query.addBindValue(from.toString(Qt::ISODate));
+  query.addBindValue(to.toString(Qt::ISODate));
+  if (!query.exec()) return results;
+
+  // (date, host) → seconds
+  QMap<QPair<QDate, QString>, int> bucket;
+  while (query.next()) {
+    QDateTime start = QDateTime::fromString(query.value(0).toString(), Qt::ISODate);
+    QDateTime end = QDateTime::fromString(query.value(1).toString(), Qt::ISODate);
+    QString host = query.value(2).toString();
+    if (!start.isValid() || !end.isValid() || start >= end) continue;
+
+    QMap<QDate, int> daySeconds;
+    splitSpanIntoDays(start, end, daySeconds);
+    for (auto it = daySeconds.constBegin(); it != daySeconds.constEnd(); ++it) {
+      if (it.key() < from || it.key() > to) continue;
+      bucket[{it.key(), host}] += it.value();
+    }
+  }
+
+  for (auto it = bucket.constBegin(); it != bucket.constEnd(); ++it) {
+    results.append({it.key().first, it.key().second, it.value()});
   }
   return results;
 }

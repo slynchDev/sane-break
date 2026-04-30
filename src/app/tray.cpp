@@ -24,7 +24,44 @@
 #include "core/app.h"
 #include "core/flags.h"
 #include "core/preferences.h"
+#include "lib/remote-activity-monitor.h"
 #include "lib/utils.h"
+
+namespace {
+
+// Renders an ActivityBreakdown into a single-line tooltip suffix like
+// "peer-hp 68% · r16 32% · 47m total". Returns empty when the breakdown
+// has fewer than 2 hosts with non-zero activity, when `fusionEnabled`
+// is false, or when no time has been accrued yet — callers append the
+// line only if it is non-empty.
+QString formatPeerBreakdown(const peer::ActivityBreakdown& breakdown,
+                            bool fusionEnabled) {
+  if (!fusionEnabled) return {};
+  if (breakdown.totalActiveSeconds <= 0) return {};
+  int nonZero = 0;
+  for (const peer::HostActivity& row : breakdown.hosts) {
+    if (row.activeSeconds > 0) ++nonZero;
+  }
+  if (nonZero < 2) return {};  // Only show when there's real attribution.
+
+  QStringList parts;
+  parts.reserve(breakdown.hosts.size());
+  for (const peer::HostActivity& row : breakdown.hosts) {
+    if (row.activeSeconds <= 0) continue;
+    parts << QStringLiteral("%1 %2%").arg(row.label).arg(row.sharePercent);
+  }
+  const int mins = breakdown.totalActiveSeconds / 60;
+  const QString totalPart = mins >= 1
+                                ? QStringLiteral("%1m total").arg(mins)
+                                : QStringLiteral("%1s total")
+                                      .arg(breakdown.totalActiveSeconds);
+  parts << totalPart;
+  return parts.join(QStringLiteral(" \u00b7 "));  // middle-dot separator
+}
+
+constexpr qint64 kPeerLineThrottleMs = 2'000;
+
+}  // namespace
 
 StatusTrayWindow* StatusTrayWindow::createTrayOrWindow(SanePreferences* preferences,
                                                        QObject* parent) {
@@ -117,42 +154,69 @@ void StatusTrayWindow::update(TrayData data) {
                           !data.isPostponing && !data.isFocusMode);
   endFocusAction->setVisible(data.isFocusMode && !data.isBreaking);
   endMeetingAction->setVisible(data.isInMeeting);
-  extendMeetingMenu->menuAction()->setVisible(data.isInMeeting);
+  extendMeetingMenu->menuAction()->setVisible(data.isInMeeting &&
+                                              !data.isMeetingIndefinite);
 
+  QString title;
   if (data.isFocusMode && !data.isInMeeting) {
     int cyclesDone = data.focusTotalCycles - data.focusCyclesRemaining;
-    setTitle(tr("focus: %1 %2 (%3/%4)")
-                 .arg(data.bigBreakEnabled ? data.smallBreaksBeforeBigBreak == 0
-                                                 ? tr("big break")
-                                                 : tr("small break")
-                                           : "")
-                 .arg(formatTime(data.secondsToNextBreak))
-                 .arg(cyclesDone)
-                 .arg(data.focusTotalCycles));
+    title = tr("focus: %1 %2 (%3/%4)")
+                .arg(data.bigBreakEnabled ? data.smallBreaksBeforeBigBreak == 0
+                                                ? tr("big break")
+                                                : tr("small break")
+                                          : "")
+                .arg(formatTime(data.secondsToNextBreak))
+                .arg(cyclesDone)
+                .arg(data.focusTotalCycles);
   } else if (data.isInMeeting) {
-    QTime meetingEndTime = QTime::currentTime().addSecs(data.meetingSecondsRemaining);
-    QString endTimeStr = QLocale().toString(meetingEndTime, QLocale::ShortFormat);
+    if (data.isMeetingIndefinite) {
+      endMeetingAction->setText(tr("Exit meeting && break now"));
+      QString reason = data.meetingReason.isEmpty() ? tr("app running")
+                                                    : data.meetingReason;
+      title = tr("Meeting mode — %1 (%2 elapsed)")
+                  .arg(reason, formatTime(data.meetingTotalSeconds));
+    } else {
+      QTime meetingEndTime =
+          QTime::currentTime().addSecs(data.meetingSecondsRemaining);
+      QString endTimeStr = QLocale().toString(meetingEndTime, QLocale::ShortFormat);
 
-    endMeetingAction->setText(tr("Exit meeting (%1)").arg(endTimeStr));
-    setTitle(tr("Meeting mode — until %1 (%2 left)")
-                 .arg(endTimeStr, formatTime(data.meetingSecondsRemaining)));
+      endMeetingAction->setText(tr("Exit meeting (%1)").arg(endTimeStr));
+      title = tr("Meeting mode — until %1 (%2 left)")
+                  .arg(endTimeStr, formatTime(data.meetingSecondsRemaining));
+    }
   } else if (data.pauseReasons) {
     if (data.pauseReasons.testFlag(PauseReason::OnBattery)) {
-      setTitle(tr("Paused on battery"));
+      title = tr("Paused on battery");
     } else if (data.pauseReasons.testFlag(PauseReason::AppOpen)) {
-      setTitle(tr("Paused on app running"));
+      title = tr("Paused on app running");
     } else if (data.pauseReasons.testFlag(PauseReason::Idle)) {
-      setTitle(tr("Paused on idle"));
+      title = tr("Paused on idle");
     } else if (data.pauseReasons.testFlag(PauseReason::UnknownMonitor)) {
-      setTitle(tr("Paused on unknown monitor"));
+      title = tr("Paused on unknown monitor");
     }
   } else if (data.bigBreakEnabled) {
-    setTitle(QString("%1 %2").arg(
+    title = QString("%1 %2").arg(
         data.smallBreaksBeforeBigBreak == 0 ? tr("big break") : tr("small break"),
-        formatTime(data.secondsToNextBreak)));
+        formatTime(data.secondsToNextBreak));
   } else {
-    setTitle(formatTime(data.secondsToNextBreak));
+    title = formatTime(data.secondsToNextBreak);
   }
+
+  // Peer-breakdown line (Req 5.3-5.5): refresh cached line at most every
+  // 2 s so rapid countdown ticks don't re-format on every invocation.
+  if (m_ram && preferences->peerFusionEnabled->get()) {
+    if (!m_peerLineTimer.isValid() ||
+        m_peerLineTimer.elapsed() >= kPeerLineThrottleMs) {
+      m_cachedPeerLine = formatPeerBreakdown(m_ram->activityBreakdown(), true);
+      m_peerLineTimer.restart();
+    }
+  } else {
+    m_cachedPeerLine.clear();
+  }
+  if (!m_cachedPeerLine.isEmpty()) {
+    title = title + '\n' + m_cachedPeerLine;
+  }
+  setTitle(title);
 }
 
 TrayIconSpec trayIconSpec(TrayData data) {
@@ -163,6 +227,13 @@ TrayIconSpec trayIconSpec(TrayData data) {
             .dot = std::nullopt};
 
   if (data.isInMeeting) {
+    if (data.isMeetingIndefinite) {
+      return {
+          .baseIcon = ":/images/icon-meeting.png",
+          .arc = std::nullopt,
+          .dot = std::nullopt,
+      };
+    }
     float arcRatio =
         data.meetingTotalSeconds > 0
             ? float(data.meetingSecondsRemaining) / data.meetingTotalSeconds

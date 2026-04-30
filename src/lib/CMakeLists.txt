@@ -3,8 +3,16 @@ add_library(
   auto-start.h
   battery-status.cpp
   battery-status.h
+  effective-idle-time.cpp
+  effective-idle-time.h
+  peer-packet.cpp
+  peer-packet.h
+  peer-secret.cpp
+  peer-secret.h
   program-monitor.cpp
   program-monitor.h
+  remote-activity-monitor.cpp
+  remote-activity-monitor.h
   screen-lock.h
   screen-monitor.cpp
   screen-monitor.h
@@ -20,10 +28,10 @@ target_include_directories(sane-lib PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 find_package(
   Qt6
-  COMPONENTS Widgets Sql
+  COMPONENTS Widgets Sql Network
   REQUIRED
 )
-target_link_libraries(sane-lib PUBLIC Qt6::Widgets sane-core sane-idle)
+target_link_libraries(sane-lib PUBLIC Qt6::Widgets Qt6::Network sane-core sane-idle)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   target_link_libraries(sane-lib PRIVATE "-framework IOKit")

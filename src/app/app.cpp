@@ -28,6 +28,8 @@
 #include "core/preferences.h"
 #include "focus-window.h"
 #include "idle/factory.h"
+#include "lib/effective-idle-time.h"
+#include "lib/remote-activity-monitor.h"
 #include "lib/screen-lock.h"
 #include "lib/system-monitor.h"
 #include "lib/timer.h"
@@ -47,9 +49,67 @@
 #endif
 
 SaneBreakApp::SaneBreakApp(const AppDependencies& deps, QObject* parent)
-    : AbstractApp(deps, parent) {
+    : AbstractApp(deps, parent), m_ram(deps.remoteActivityMonitor) {
   prefWindow = new PreferenceWindow(preferences);
+  prefWindow->setRemoteActivityMonitor(m_ram);
   tray = StatusTrayWindow::createTrayOrWindow(preferences, this);
+  tray->setRemoteActivityMonitor(m_ram);
+
+  if (m_ram) {
+    // Task 9.3: toggle fusion on/off without rebuilding the dependency graph.
+    // The EffectiveIdleTime facade falls through to pass-through semantics
+    // when ram->stop() emits peerActivityChanged(false) within the same
+    // event-loop turn, so no AppDependencies rewire is needed.
+    connect(preferences->peerFusionEnabled, &SettingWithSignal::changed, this,
+            &SaneBreakApp::onPeerFusionToggled);
+    // Task 9.4: port or interface changes force a rebind. Handler reverts to
+    // the last known-good binding if the new one fails.
+    connect(preferences->peerListenPort, &SettingWithSignal::changed, this,
+            &SaneBreakApp::onPeerBindingChanged);
+    connect(preferences->peerBroadcastInterfaces, &SettingWithSignal::changed, this,
+            &SaneBreakApp::onPeerBindingChanged);
+    // Task 9.5: breakStart is emitted from AppStateBreak::enter() on every
+    // break-entry path (normal expiry, BigBreakNow, EndMeetingBreakNow, etc.),
+    // so a single connect hits all of them. resetAttribution() zeros the
+    // local and per-peer active-seconds counters for the new cycle.
+    connect(this, &AppContext::breakStart, m_ram,
+            &peer::RemoteActivityMonitor::resetAttribution);
+    // Phase 14: meetingStart/End are emitted from AppStateMeeting::enter/exit
+    // so peer machines learn the local host is in a meeting and can suppress
+    // their own idle-driven break scheduling for the duration.
+    connect(this, &AppContext::meetingStart, m_ram,
+            &peer::RemoteActivityMonitor::broadcastMeetingStart);
+    connect(this, &AppContext::meetingEnd, m_ram,
+            &peer::RemoteActivityMonitor::broadcastMeetingEnd);
+    // Phase 14 consumer: a peer entering a meeting raises a pause request
+    // with PauseReason::PeerMeeting on this host. Reuses the existing
+    // pause machinery (AppStateNormal -> AppStatePaused transition, which
+    // also handles long-pause cycle reset on resume). This is the
+    // "cleanest" consumer option noted in STATUS.md: no new AppState,
+    // no new idle-facade coupling, just a pre-existing reason code.
+    connect(m_ram, &peer::RemoteActivityMonitor::peerMeetingChanged, this,
+            [this](bool inMeeting) {
+              if (inMeeting)
+                onPauseRequest(PauseReason::PeerMeeting);
+              else
+                onResumeRequest(PauseReason::PeerMeeting);
+            });
+    // Synchronized peer break: broadcast BREAK_START when a locally-initiated
+    // break fires. Peer-triggered breaks set peerTriggered=true on the entering
+    // AppStateBreak, so the cast here guards against re-broadcasting (loop
+    // prevention per Requirement 3.2). Only runs when peerFusionEnabled=true
+    // because m_ram->start() is gated on that setting in SaneBreakApp::start().
+    connect(this, &AppContext::breakStart, this, [this]() {
+      if (!preferences->peerFusionEnabled->get()) return;
+      auto* breakState = dynamic_cast<AppStateBreak*>(m_currentState.get());
+      if (!breakState || breakState->peerTriggered) return;
+      m_ram->broadcastBreakStart(data->breakType());
+    });
+    // Receive: a peer's BREAK_START causes the local machine to enter a break
+    // immediately, regardless of where the local timer stands.
+    connect(m_ram, &peer::RemoteActivityMonitor::peerBreakRequested, this,
+            &SaneBreakApp::onPeerBreakRequested);
+  }
 
   connect(this, &SaneBreakApp::trayDataUpdated, tray, &StatusTrayWindow::update);
   connect(tray, &StatusTrayWindow::nextBreakRequested, this, &SaneBreakApp::breakNow);
@@ -91,22 +151,81 @@ SaneBreakApp::SaneBreakApp(const AppDependencies& deps, QObject* parent)
 }
 
 SaneBreakApp* SaneBreakApp::create(SanePreferences* preferences, QObject* parent) {
+  // rawIdleTimer is referenced by BOTH the RemoteActivityMonitor (as its
+  // local idle source, to keep the peer-feedback-loop protection described
+  // in remote-activity-monitor.h) and EffectiveIdleTime (as the wrapped
+  // timer). Single raw instance, two consumers.
+  SystemIdleTime* rawIdleTimer = createIdleTimer(parent);
+  auto* ram = new peer::RemoteActivityMonitor(preferences, rawIdleTimer, parent);
+  auto* idleTimer = new EffectiveIdleTime(rawIdleTimer, ram, parent);
   AppDependencies deps = {
       .preferences = preferences,
       .db = new BreakDatabase(QSqlDatabase::addDatabase("QSQLITE")),
       .countDownTimer = new Timer(),
       .screenLockTimer = new Timer(),
-      .idleTimer = createIdleTimer(parent),
+      .idleTimer = idleTimer,
       .systemMonitor = new SystemMonitor(preferences),
       .breakWindows = new BreakWindows(),
       .meetingPrompt = new MeetingPrompt(parent, preferences),
+      .remoteActivityMonitor = ram,
   };
   return new SaneBreakApp(deps, parent);
 }
 
 void SaneBreakApp::start() {
   AbstractApp::start();
+  if (m_ram && preferences->peerFusionEnabled->get()) {
+    m_ram->start();
+    snapshotLastGoodPeerBinding();
+  }
   tray->show();
+}
+
+void SaneBreakApp::snapshotLastGoodPeerBinding() {
+  if (!m_ram || !m_ram->isRunning()) return;
+  m_lastGoodPort = preferences->peerListenPort->get();
+  m_lastGoodInterfaces = preferences->peerBroadcastInterfaces->get();
+}
+
+void SaneBreakApp::onPeerFusionToggled() {
+  if (!m_ram) return;
+  if (preferences->peerFusionEnabled->get()) {
+    m_ram->start();
+    snapshotLastGoodPeerBinding();
+  } else {
+    m_ram->stop();
+  }
+}
+
+void SaneBreakApp::onPeerBindingChanged() {
+  if (!m_ram) return;
+  if (!preferences->peerFusionEnabled->get()) return;
+  // Reverting preferences below fires the same `changed` signal; guard
+  // against reentering this handler during the revert.
+  if (m_peerRebindGuard) return;
+  m_peerRebindGuard = true;
+
+  m_ram->stop();
+  m_ram->start();
+
+  if (!m_ram->isRunning()) {
+    // Rebind with the new port / interface list failed. Revert to the last
+    // known-good snapshot (Req 7.8) and re-bind so the user is left in a
+    // working state. If no snapshot was ever captured (fusion never
+    // successfully bound in this session), fall through and leave ram
+    // stopped — the tray / pref-window live indicator surfaces this.
+    qWarning("Peer fusion: rebind failed; reverting port/interface settings");
+    if (m_lastGoodPort.has_value()) {
+      preferences->peerListenPort->set(*m_lastGoodPort);
+    }
+    if (m_lastGoodInterfaces.has_value()) {
+      preferences->peerBroadcastInterfaces->set(*m_lastGoodInterfaces);
+    }
+    m_ram->start();
+  }
+
+  snapshotLastGoodPeerBinding();
+  m_peerRebindGuard = false;
 }
 
 void SaneBreakApp::doLockScreen() { lockScreen(); }
@@ -177,6 +296,36 @@ void SaneBreakApp::openMeetingWindow() {
             });
   }
   showAndActivate(meetingWindow);
+}
+
+void SaneBreakApp::onPeerBreakRequested(BreakType type) {
+  // Peer-initiated breaks override postpone: postpone is a local affordance
+  // to delay the LOCAL timer and cannot negate the peer's signal that
+  // aggregate typing has hit the configured limit.
+  if (m_currentState->getID() == AppState::Break) return;  // already breaking
+  if (m_currentState->getID() == AppState::Meeting) return;  // meetings take priority
+
+  // Clear any active pause so the transition into AppStateBreak isn't blocked.
+  if (m_currentState->getID() == AppState::Paused) data->pause().clearReasons();
+
+  // If the peer requested a big break and big breaks are enabled locally,
+  // honour that intent. Otherwise fall through with a small break.
+  if (type == BreakType::Big && data->currentBreakConfig().bigEnabled) {
+    data->makeNextBreakBig();
+  } else if (type == BreakType::Big) {
+    qDebug("Peer requested big break but big breaks are disabled locally; using small");
+  }
+
+  // Zero the local countdown so the tray shows the break as immediate rather
+  // than showing stale "next break in N min" text during the transition.
+  data->schedule().earlyBreak();
+
+  auto breakState = std::make_unique<AppStateBreak>();
+  breakState->peerTriggered = true;
+  transitionTo(std::move(breakState));
+  // AppStateBreak::enter() emits breakStart() synchronously. The gated
+  // broadcastBreakStart connect above sees peerTriggered=true and skips
+  // the outbound packet, preventing a break loop.
 }
 
 void SaneBreakApp::confirmQuit() {

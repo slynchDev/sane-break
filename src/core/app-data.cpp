@@ -158,18 +158,29 @@ void MeetingState::setOnChanged(std::function<void()> onChanged) {
   m_onChanged = std::move(onChanged);
 }
 bool MeetingState::isActive() const { return m_isActive; }
+bool MeetingState::isIndefinite() const { return m_isIndefinite; }
 int MeetingState::secondsRemaining() const { return m_secondsRemaining; }
 int MeetingState::totalSeconds() const { return m_totalSeconds; }
 QString MeetingState::reason() const { return m_reason; }
 void MeetingState::set(int secondsRemaining, int totalSeconds, const QString& reason) {
   m_isActive = true;
+  m_isIndefinite = false;
   m_secondsRemaining = secondsRemaining;
   m_totalSeconds = totalSeconds;
   m_reason = reason;
   notifyChanged();
 }
+void MeetingState::setIndefinite(const QString& reason) {
+  m_isActive = true;
+  m_isIndefinite = true;
+  m_secondsRemaining = 0;
+  m_totalSeconds = 0;
+  m_reason = reason;
+  notifyChanged();
+}
 void MeetingState::clear() {
   m_isActive = false;
+  m_isIndefinite = false;
   m_secondsRemaining = 0;
   m_totalSeconds = 0;
   m_reason.clear();
@@ -177,6 +188,10 @@ void MeetingState::clear() {
 }
 void MeetingState::tickRemaining() {
   m_secondsRemaining--;
+  notifyChanged();
+}
+void MeetingState::tickElapsed() {
+  m_totalSeconds++;
   notifyChanged();
 }
 void MeetingState::subtractRemaining(int secs) {

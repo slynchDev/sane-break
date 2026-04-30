@@ -66,6 +66,18 @@ AbstractApp::AbstractApp(const AppDependencies& deps, QObject* parent)
   connect(breakWindows, &AbstractBreakWindows::startBreakRequested, this,
           &AbstractApp::breakNow);
 
+  connect(m_systemMonitor, &AbstractSystemMonitor::meetingAppStarted, this, [this]() {
+    if (preferences->autoMeetingOnApp->get()) {
+      startIndefiniteMeeting(tr("App detected"));
+    }
+  });
+  connect(m_systemMonitor, &AbstractSystemMonitor::meetingAppStopped, this, [this]() {
+    if (m_currentState->getID() == AppState::Meeting &&
+        data->meeting().isIndefinite()) {
+      endMeetingBreakLater(preferences->smallEvery->get());
+    }
+  });
+
   connect(preferences->pauseOnBattery, &SettingWithSignal::changed, this,
           &AbstractApp::onBatterySettingChange);
   connect(preferences->smallEvery, &SettingWithSignal::changed, this, [this]() {
@@ -109,8 +121,10 @@ void AbstractApp::updateTray() {
       .bigBreakEnabled = bigEnabled,
       .pauseReasons = data->pause().reasons(),
       .isInMeeting = data->meeting().isActive(),
+      .isMeetingIndefinite = data->meeting().isIndefinite(),
       .meetingSecondsRemaining = data->meeting().secondsRemaining(),
       .meetingTotalSeconds = data->meeting().totalSeconds(),
+      .meetingReason = data->meeting().reason(),
       .isPostponing = data->schedule().isPostponing(),
       .isFocusMode = data->focus().isActive(),
       .focusCyclesRemaining = data->focus().cyclesRemaining(),
@@ -141,13 +155,26 @@ void AbstractApp::startFocus(int totalCycles, const QString& reason) {
 void AbstractApp::endFocus() { onMenuAction(Action::EndFocus{}); }
 
 void AbstractApp::startMeeting(int seconds, const QString& reason) {
+  startMeetingInternal(seconds, reason, false);
+}
+
+void AbstractApp::startIndefiniteMeeting(const QString& reason) {
+  startMeetingInternal(0, reason, true);
+}
+
+void AbstractApp::startMeetingInternal(int seconds, const QString& reason,
+                                       bool indefinite) {
   if (m_currentState->getID() == AppState::Meeting) return;
   data->schedule().resetPostpone();
   if (data->focus().isActive()) {
     db->closeSpan(data->focus().spanId(), {{"reason", "meeting"}});
     data->focus().end();
   }
-  data->meeting().set(seconds, seconds, reason);
+  if (indefinite) {
+    data->meeting().setIndefinite(reason);
+  } else {
+    data->meeting().set(seconds, seconds, reason);
+  }
   transitionTo(std::make_unique<AppStateMeeting>());
 }
 

@@ -5,10 +5,12 @@
 #pragma once
 #include <QColor>
 #include <QContextMenuEvent>
+#include <QElapsedTimer>
 #include <QLabel>
 #include <QMenu>
 #include <QObject>
 #include <QPixmap>
+#include <QString>
 #include <QSystemTrayIcon>
 #include <QTimer>
 #include <QVector>
@@ -17,6 +19,10 @@
 
 #include "core/app.h"
 #include "core/preferences.h"
+
+namespace peer {
+class RemoteActivityMonitor;
+}
 
 struct TrayArcSpec {
   QColor dark;
@@ -44,6 +50,13 @@ class StatusTrayWindow : public QObject {
   virtual void show() = 0;
   virtual void setTitle(QString str) = 0;
   virtual void update(TrayData data);
+
+  // Optional wiring — when non-null, update() appends a "peer-hp 68% ·
+  // r16 32% · 47m total" line to the tooltip. The peer line rebuilds at
+  // most once every 2 s (independent of the 1 Hz countdown tick).
+  void setRemoteActivityMonitor(peer::RemoteActivityMonitor* ram) {
+    m_ram = ram;
+  }
 
  signals:
   void nextBreakRequested();
@@ -79,6 +92,12 @@ class StatusTrayWindow : public QObject {
   QAction* bigBreakAction;
   QAction* smallBreakInsteadAction;
   QAction* enableBreak;
+
+  // Peer-breakdown tooltip state. m_ram is nullable; when non-null and
+  // peerFusionEnabled is true, update() appends a cached peer line.
+  peer::RemoteActivityMonitor* m_ram = nullptr;
+  QString m_cachedPeerLine;
+  QElapsedTimer m_peerLineTimer;
 };
 
 class StatusTray : public StatusTrayWindow {

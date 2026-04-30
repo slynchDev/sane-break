@@ -32,12 +32,39 @@ SystemMonitor::SystemMonitor(SanePreferences* preferences, QObject* parent)
       emit resumeRequested(PauseReason::OnBattery);
   });
   connect(runningProgramsMonitor, &RunningProgramsMonitor::programStarted, this,
-          [this]() { emit pauseRequested(PauseReason::AppOpen); });
+          [this]() {
+            if (this->preferences->autoMeetingOnApp->get()) return;
+            m_appOpenPausePending = true;
+            emit pauseRequested(PauseReason::AppOpen);
+          });
   connect(runningProgramsMonitor, &RunningProgramsMonitor::programStopped, this,
-          [this]() { emit resumeRequested(PauseReason::AppOpen); });
+          [this]() {
+            if (!m_appOpenPausePending) return;
+            m_appOpenPausePending = false;
+            emit resumeRequested(PauseReason::AppOpen);
+          });
+  connect(runningProgramsMonitor, &RunningProgramsMonitor::meetingStarted, this,
+          &SystemMonitor::meetingAppStarted);
+  connect(runningProgramsMonitor, &RunningProgramsMonitor::meetingStopped, this,
+          &SystemMonitor::meetingAppStopped);
 
   connect(preferences->programsToMonitor, &SettingWithSignal::changed, this, [this]() {
     runningProgramsMonitor->setPrograms(this->preferences->programsToMonitor->get());
+  });
+  connect(preferences->autoMeetingOnApp, &SettingWithSignal::changed, this, [this]() {
+    bool enabled = this->preferences->autoMeetingOnApp->get();
+    runningProgramsMonitor->setMeetingDetectionEnabled(enabled);
+    if (enabled && m_appOpenPausePending) {
+      m_appOpenPausePending = false;
+      emit resumeRequested(PauseReason::AppOpen);
+    } else if (!enabled && !m_appOpenPausePending &&
+               runningProgramsMonitor->isAnyProgramRunning()) {
+      // Feature turned off while a monitored program is already running:
+      // the programStarted edge was swallowed earlier, so synthesize the
+      // pause now to match the non-auto-meeting behavior.
+      m_appOpenPausePending = true;
+      emit pauseRequested(PauseReason::AppOpen);
+    }
   });
 
   connect(screenMonitor, &ScreenMonitor::unknownMonitorConnected, this, [this]() {
@@ -58,6 +85,8 @@ SystemMonitor::SystemMonitor(SanePreferences* preferences, QObject* parent)
 
 void SystemMonitor::start() {
   batteryWatcher->startWatching();
+  runningProgramsMonitor->setMeetingDetectionEnabled(
+      preferences->autoMeetingOnApp->get());
   runningProgramsMonitor->setPrograms(preferences->programsToMonitor->get());
   runningProgramsMonitor->startMonitoring();
   screenMonitor->setKnownMonitors(preferences->knownMonitors->get());

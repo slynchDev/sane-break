@@ -50,6 +50,12 @@ struct DailyUsageStats {
   int pausedSeconds = 0;   // Paused + Meeting
 };
 
+struct HostUsageStats {
+  QDate date;
+  QString host;
+  int activeSeconds = 0;
+};
+
 class BreakDatabase : public QObject {
   Q_OBJECT
  public:
@@ -63,9 +69,29 @@ class BreakDatabase : public QObject {
                  const QDateTime& endTime = {});
   QList<DailyBreakStats> queryDailyBreakStats(QDate from, QDate to);
   QList<DailyUsageStats> queryDailyUsageStats(QDate from, QDate to);
+  QList<HostUsageStats> queryDailyUsageByHost(QDate from, QDate to);
   QList<DayTimelineData> queryDailyTimelines(QDate from, QDate to);
+
+  // True if startup migration failed — write operations no-op (debug log
+  // only) for the session; next launch retries the migration. Read
+  // queries still run normally.
+  bool isReadOnly() const { return m_readOnlyMode; }
+
+ signals:
+  // Fired once from ensureDb() when a migration fails. SaneBreakApp
+  // surfaces this as a user-visible dialog on startup.
+  void initializationFailed(const QString& error);
 
  protected:
   QSqlError ensureDb();
+  // Applies incremental schema migrations keyed on PRAGMA user_version.
+  // v0→v2 adds the `host` column to spans and backfills with the local
+  // hostname. Idempotent: a no-op when user_version is already ≥ 2.
+  QSqlError migrate();
   QSqlDatabase m_db;
+  bool m_readOnlyMode = false;
+  // Guards ensureDb() against re-running CREATE TABLE / migrate() on every
+  // call. Tests that pre-open a database still get one initialization pass
+  // because ensureDb short-circuits on this flag, not on QSqlDatabase::isOpen.
+  bool m_initialized = false;
 };

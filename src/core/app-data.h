@@ -94,13 +94,16 @@ class MeetingState {
   void setOnChanged(std::function<void()> onChanged);
 
   bool isActive() const;
+  bool isIndefinite() const;
   int secondsRemaining() const;
   int totalSeconds() const;
   QString reason() const;
 
   void set(int secondsRemaining, int totalSeconds, const QString& reason);
+  void setIndefinite(const QString& reason);
   void clear();
   void tickRemaining();
+  void tickElapsed();
   void subtractRemaining(int secs);
   void extend(int secs);
 
@@ -109,6 +112,7 @@ class MeetingState {
 
   std::function<void()> m_onChanged;
   bool m_isActive = false;
+  bool m_isIndefinite = false;
   int m_secondsRemaining = 0;
   int m_totalSeconds = 0;
   QString m_reason;

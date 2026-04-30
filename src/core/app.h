@@ -17,6 +17,10 @@
 #include "core/system-monitor.h"
 #include "core/timer.h"
 
+namespace peer {
+class RemoteActivityMonitor;
+}
+
 struct AppDependencies {
   SanePreferences* preferences = nullptr;
   BreakDatabase* db = nullptr;
@@ -26,6 +30,11 @@ struct AppDependencies {
   AbstractSystemMonitor* systemMonitor = nullptr;
   AbstractBreakWindows* breakWindows = nullptr;
   AbstractMeetingPrompt* meetingPrompt = nullptr;
+  // Nullable. When non-null, SaneBreakApp owns lifecycle management
+  // (start/stop on peerFusionEnabled changes, rebind on port/interface
+  // changes). AbstractApp never touches this pointer so `sane-core` stays
+  // free of any `sane-lib` link dependency.
+  peer::RemoteActivityMonitor* remoteActivityMonitor = nullptr;
 };
 
 struct TrayData {
@@ -37,8 +46,10 @@ struct TrayData {
   bool bigBreakEnabled;
   PauseReasons pauseReasons;
   bool isInMeeting;
+  bool isMeetingIndefinite;
   int meetingSecondsRemaining;
   int meetingTotalSeconds;
+  QString meetingReason;
   bool isPostponing;
   bool isFocusMode;
   int focusCyclesRemaining;
@@ -61,6 +72,7 @@ class AbstractApp : public AppContext {
   void enableBreak();
 
   void startMeeting(int seconds, const QString& reason);
+  void startIndefiniteMeeting(const QString& reason);
   void endMeetingBreakNow();
   void endMeetingBreakLater(int seconds);
   void extendMeeting(int seconds);
@@ -80,4 +92,7 @@ class AbstractApp : public AppContext {
   void updateTray();
 
   virtual void doLockScreen() = 0;
+
+ private:
+  void startMeetingInternal(int seconds, const QString& reason, bool indefinite);
 };
