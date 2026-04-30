@@ -35,6 +35,7 @@ enum EventType : uint8_t {
   EVENT_ACTIVITY = 0x01,
   EVENT_IDLE_TRANSITION = 0x02,
   EVENT_MEETING_TRANSITION = 0x03,
+  EVENT_BREAK_START = 0x04,
 };
 
 enum State : uint8_t {
@@ -47,6 +48,14 @@ enum State : uint8_t {
 enum MeetingState : uint8_t {
   MEETING_ENDED = 0x00,
   MEETING_STARTED = 0x01,
+};
+
+// Payload values for EVENT_BREAK_START. BREAK_SMALL/BREAK_BIG map 1:1 to
+// BreakType::Small/Big in flags.h — conversion helpers live in
+// remote-activity-monitor.cpp to avoid pulling core headers into peer-packet.h.
+enum BreakKind : uint8_t {
+  BREAK_SMALL = 0x00,
+  BREAK_BIG = 0x01,
 };
 
 struct Packet {

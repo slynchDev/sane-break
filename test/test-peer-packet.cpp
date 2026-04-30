@@ -316,6 +316,86 @@ class TestPeerPacket : public QObject {
     QCOMPARE(why, QString("bad MEETING_TRANSITION state byte"));
   }
 
+  // --- Synchronized peer break: BREAK_START wire format -------------------
+
+  void round_trip_break_start_small() {
+    auto secret = makeSecret();
+    peer::Packet p;
+    p.senderUuid = makeUuid(4);
+    p.hostname = "r16";
+    p.timestamp = 1'700'000'000;
+    p.nonce = 9;
+    p.eventType = peer::EVENT_BREAK_START;
+    p.payload = QByteArray(1, static_cast<char>(peer::BREAK_SMALL));
+    auto bytes = peer::encodePacket(p, secret);
+
+    auto decoded = peer::decodePacket(bytes, secret);
+    QVERIFY(decoded.has_value());
+    QCOMPARE(uint8_t(decoded->eventType), uint8_t(peer::EVENT_BREAK_START));
+    QCOMPARE(decoded->payload.size(), qsizetype(1));
+    QCOMPARE(static_cast<uint8_t>(decoded->payload[0]), uint8_t(peer::BREAK_SMALL));
+  }
+
+  void round_trip_break_start_big() {
+    auto secret = makeSecret();
+    peer::Packet p;
+    p.senderUuid = makeUuid(4);
+    p.hostname = "r16";
+    p.timestamp = 1'700'000'000;
+    p.nonce = 10;
+    p.eventType = peer::EVENT_BREAK_START;
+    p.payload = QByteArray(1, static_cast<char>(peer::BREAK_BIG));
+    auto bytes = peer::encodePacket(p, secret);
+
+    auto decoded = peer::decodePacket(bytes, secret);
+    QVERIFY(decoded.has_value());
+    QCOMPARE(static_cast<uint8_t>(decoded->payload[0]), uint8_t(peer::BREAK_BIG));
+  }
+
+  void decode_fails_on_break_start_payload_wrong_size() {
+    auto secret = makeSecret();
+    // 0-byte payload
+    auto bytes0 = buildSignedRaw(peer::kMagic, peer::kVersion, peer::kKeyIdV1,
+                                 makeUuid(1), 0, {}, 1'700'000'000, 1,
+                                 peer::EVENT_BREAK_START, 0, {}, secret);
+    QString why;
+    QVERIFY(!peer::decodePacket(bytes0, secret, &why).has_value());
+    QCOMPARE(why, QString("bad BREAK_START payload size"));
+
+    // 2-byte payload
+    auto bytes2 = buildSignedRaw(peer::kMagic, peer::kVersion, peer::kKeyIdV1,
+                                 makeUuid(1), 0, {}, 1'700'000'000, 2,
+                                 peer::EVENT_BREAK_START, 2, QByteArray(2, '\0'),
+                                 secret);
+    QVERIFY(!peer::decodePacket(bytes2, secret, &why).has_value());
+    QCOMPARE(why, QString("bad BREAK_START payload size"));
+  }
+
+  void decode_fails_on_break_start_invalid_kind_byte() {
+    auto secret = makeSecret();
+    QByteArray p02(1, '\x02');
+    auto bytes = buildSignedRaw(peer::kMagic, peer::kVersion, peer::kKeyIdV1,
+                                makeUuid(1), 0, {}, 1'700'000'000, 1,
+                                peer::EVENT_BREAK_START, 1, p02, secret);
+    QString why;
+    QVERIFY(!peer::decodePacket(bytes, secret, &why).has_value());
+    QCOMPARE(why, QString("bad BREAK_START kind byte"));
+  }
+
+  void decode_fails_on_break_start_with_corrupted_hmac() {
+    auto secret = makeSecret();
+    peer::Packet p;
+    p.senderUuid = makeUuid(4);
+    p.hostname = "r16";
+    p.timestamp = 1'700'000'000;
+    p.nonce = 11;
+    p.eventType = peer::EVENT_BREAK_START;
+    p.payload = QByteArray(1, static_cast<char>(peer::BREAK_SMALL));
+    auto bytes = peer::encodePacket(p, secret);
+    bytes[bytes.size() - 1] = static_cast<char>(bytes[bytes.size() - 1] ^ 0xFF);
+    QVERIFY(!peer::decodePacket(bytes, secret).has_value());
+  }
+
   void decode_fails_on_tampered_hmac() {
     auto secret = makeSecret();
     auto bytes = peer::encodePacket(makeActivityPacket(), secret);

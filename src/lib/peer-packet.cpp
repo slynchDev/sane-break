@@ -155,7 +155,7 @@ std::optional<Packet> decodePacket(const QByteArray& bytes, const QByteArray& se
   pos += 2;
 
   if (eventType != EVENT_ACTIVITY && eventType != EVENT_IDLE_TRANSITION &&
-      eventType != EVENT_MEETING_TRANSITION) {
+      eventType != EVENT_MEETING_TRANSITION && eventType != EVENT_BREAK_START) {
     return drop("unknown event_type");
   }
 
@@ -175,6 +175,9 @@ std::optional<Packet> decodePacket(const QByteArray& bytes, const QByteArray& se
   if (eventType == EVENT_MEETING_TRANSITION && payloadLength != 1) {
     return drop("bad MEETING_TRANSITION payload size");
   }
+  if (eventType == EVENT_BREAK_START && payloadLength != 1) {
+    return drop("bad BREAK_START payload size");
+  }
 
   QByteArray payload = readBytes(payloadLength);
 
@@ -188,6 +191,12 @@ std::optional<Packet> decodePacket(const QByteArray& bytes, const QByteArray& se
     uint8_t state = static_cast<uint8_t>(payload[0]);
     if (state != MEETING_ENDED && state != MEETING_STARTED) {
       return drop("bad MEETING_TRANSITION state byte");
+    }
+  }
+  if (eventType == EVENT_BREAK_START) {
+    uint8_t kind = static_cast<uint8_t>(payload[0]);
+    if (kind != BREAK_SMALL && kind != BREAK_BIG) {
+      return drop("bad BREAK_START kind byte");
     }
   }
 
