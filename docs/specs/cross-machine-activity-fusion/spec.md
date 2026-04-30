@@ -341,7 +341,7 @@ stateDiagram-v2
 
 ## Out of Scope
 
-- **Break-state synchronization.** Showing the break window simultaneously on all peers when one host enters a break. v1 lets each host run its own UI timeline; a future `BREAK_START` / `BREAK_END` event type can be added under the same signing framework.
+- **Break-state synchronization.** Originally deferred. Now specified in `docs/specs/synchronized-peer-break/spec.md` and implemented as `event_type 0x04 = EVENT_BREAK_START`. When one host's break timer fires it broadcasts a `BREAK_START` packet; peers receiving it immediately enter `AppStateBreak`, ensuring aggregate typing time across KVM-switched machines drives a single coordinated break cycle.
 - **Authority election.** Deciding which host "owns" a scheduled break when multiple are simultaneously eligible. Not required for the KVM use case (only one display is visible at a time).
 - **Cross-host DB aggregation.** Each instance writes only its own spans, tagged with its own hostname. The stats window's per-host row is computed locally from the `host` column of this host's spans; no remote DB pulls, no cross-machine historical merging.
 - **Payload encryption.** Packets are authenticated (HMAC) but not encrypted. Keystroke *counts* are low-signal; the metadata-leakage surface (hostname, activity timing) is mitigated instead by the interface allowlist (default empty, user opts in per interface) and by the pref-window user-visible note. If confidentiality is later wanted, AEAD (AES-GCM) can be added under the same key with a new `version` byte.

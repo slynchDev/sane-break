@@ -287,7 +287,7 @@
 
 ## Phase 7: Manual verification and documentation
 
-- [ ] **7.1** Add manual KVM verification procedure
+- [x] **7.1** Add manual KVM verification procedure
   - Append a section to `docs/specs/cross-machine-activity-fusion/STATUS.md` (or create a new `docs/specs/synchronized-peer-break/STATUS.md`) documenting the manual smoke test:
     1. Both machines running peer fusion + synchronized break.
     2. Set break interval to 2 minutes for fast iteration.
@@ -299,7 +299,7 @@
   - _Depends: 4.3_
   - _Spec: All requirements (manual integration test)_
 
-- [ ] **7.2** Update `Out of Scope` in cross-machine-activity-fusion spec
+- [x] **7.2** Update `Out of Scope` in cross-machine-activity-fusion spec
   - In `docs/specs/cross-machine-activity-fusion/spec.md` line 344, update the first bullet of `Out of Scope` to reference this spec:
     ```
     - **Break-state synchronization.** Originally deferred. Now specified
