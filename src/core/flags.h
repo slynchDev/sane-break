@@ -21,3 +21,4 @@ Q_DECLARE_FLAGS(PauseReasons, PauseReason)
 Q_DECLARE_OPERATORS_FOR_FLAGS(PauseReasons)
 
 enum class BreakType { Small, Big };
+Q_DECLARE_METATYPE(BreakType)

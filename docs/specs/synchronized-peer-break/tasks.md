@@ -41,12 +41,12 @@
 
 ## Phase 2: RemoteActivityMonitor broadcast and receive
 
-- [ ] **2.1** Add `BreakType ↔ BreakKind` mapping helpers
+- [x] **2.1** Add `BreakType ↔ BreakKind` mapping helpers
   - In `src/lib/remote-activity-monitor.cpp` (or a small inline helper at the top of the file), add `static uint8_t breakTypeToWire(BreakType t)` and `static BreakType breakTypeFromWire(uint8_t b)` returning `BreakType::Small` for `BREAK_SMALL` and `BreakType::Big` for any other value (defensive default — invalid values are already filtered out by the decoder per 1.3, but if one slips through we treat it as a small break, the less-disruptive choice).
   - _Depends: 1.2_
   - _Spec: Requirement 1.2, Constraints_
 
-- [ ] **2.2** Add `buildBreakStartPacket` builder
+- [x] **2.2** Add `buildBreakStartPacket` builder
   - In `src/lib/remote-activity-monitor.h`, declare:
     ```cpp
     QByteArray buildBreakStartPacket(const QDateTime& now, uint8_t kind) const;
@@ -55,7 +55,7 @@
   - _Depends: 1.1, 1.2, 1.3_
   - _Spec: Requirement 1.2_
 
-- [ ] **2.3** Add `broadcastBreakStart(BreakType)` slot
+- [x] **2.3** Add `broadcastBreakStart(BreakType)` slot
   - In `src/lib/remote-activity-monitor.h`, add to the `public slots:` block (next to `broadcastMeetingStart` / `broadcastMeetingEnd`):
     ```cpp
     void broadcastBreakStart(BreakType type);
@@ -70,7 +70,7 @@
   - _Depends: 1.1, 2.1, 2.2_
   - _Spec: Requirements 1.2, 1.4_
 
-- [ ] **2.4** Add `peerBreakRequested(BreakType)` signal
+- [x] **2.4** Add `peerBreakRequested(BreakType)` signal
   - In `src/lib/remote-activity-monitor.h`, add to the `signals:` block (after `peerMeetingChanged`):
     ```cpp
     void peerBreakRequested(BreakType type);
@@ -79,7 +79,7 @@
   - _Depends: 2.1_
   - _Spec: Requirement 2.1_
 
-- [ ] **2.5** Wire `BREAK_START` receive path in `handleReceivedDatagram`
+- [x] **2.5** Wire `BREAK_START` receive path in `handleReceivedDatagram`
   - In `src/lib/remote-activity-monitor.cpp::handleReceivedDatagram`, after the existing `EVENT_MEETING_TRANSITION` arm, add a new arm for `event_type == EVENT_BREAK_START`:
     1. Apply the same loopback guard as other event types: if `decoded->senderUuid == m_senderUuid`, return without emitting (already filtered at the top of the function via the existing self-traffic drop, but the structure of the existing meeting arm shows the placement).
     2. Map the payload byte via `breakTypeFromWire(payload[0])`.
@@ -89,7 +89,7 @@
   - _Depends: 1.1, 2.1, 2.4_
   - _Spec: Requirements 2.1, 3.4_
 
-- [ ] **2.6** Unit tests for broadcast and receive
+- [x] **2.6** Unit tests for broadcast and receive
   - In `tests/test-remote-activity-monitor.cpp`, add:
     - `broadcast_break_start_emits_signed_packet`: call `broadcastBreakStart(BreakType::Small)`, capture sent bytes via the existing test transmit hook, decode, assert `eventType == EVENT_BREAK_START` and payload byte == `BREAK_SMALL`.
     - `broadcast_break_start_skipped_when_not_running`: with `m_running == false`, `broadcastBreakStart` produces no transmit.

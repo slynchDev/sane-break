@@ -13,6 +13,7 @@
 #include <QSet>
 #include <QString>
 
+#include "core/flags.h"
 #include "core/idle-time.h"
 #include "core/preferences.h"
 #include "peer-packet.h"
@@ -113,6 +114,10 @@ class RemoteActivityMonitor : public QObject {
   QByteArray buildMeetingTransitionPacket(const QDateTime& now,
                                           uint8_t state) const;
 
+  // Build a BREAK_START packet with `kind` ∈ {peer::BREAK_SMALL, peer::BREAK_BIG}
+  // and a fresh nonce.
+  QByteArray buildBreakStartPacket(const QDateTime& now, uint8_t kind) const;
+
   QByteArray senderUuid() const { return m_senderUuid; }
   bool anyPeerActive() const { return m_anyPeerActive; }
   bool anyPeerInMeeting() const { return m_anyPeerInMeeting; }
@@ -142,6 +147,9 @@ class RemoteActivityMonitor : public QObject {
   // Phase 14 — emitted whenever the aggregate across all non-offline peers
   // transitions between "at least one in meeting" and "none in meeting".
   void peerMeetingChanged(bool anyPeerInMeeting);
+  // Emitted when a valid BREAK_START packet is received from a non-self peer.
+  // The BreakType indicates whether the peer's break is small or big.
+  void peerBreakRequested(BreakType type);
 
  public slots:
   // Wire targets — public so tests can trigger them deterministically
@@ -152,6 +160,9 @@ class RemoteActivityMonitor : public QObject {
   // Phase 14 — wire targets for AppContext::meetingStart/meetingEnd.
   void broadcastMeetingStart();
   void broadcastMeetingEnd();
+  // Wire target for the gated AppContext::breakStart path in SaneBreakApp.
+  // Broadcasts a BREAK_START packet encoding the given break type.
+  void broadcastBreakStart(BreakType type);
 
  private slots:
   void onDatagramReady();

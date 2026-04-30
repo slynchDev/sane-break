@@ -762,6 +762,120 @@ class TestRemoteActivityMonitor : public QObject {
       QCOMPARE(static_cast<uint8_t>(packet->payload[0]), state);
     }
   }
+
+  // --- Synchronized peer break: BREAK_START broadcast and receive ----------
+
+  void broadcast_break_start_emits_signed_packet() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    for (auto [breakType, expectedKind] :
+         std::initializer_list<std::pair<BreakType, uint8_t>>{
+             {BreakType::Small, peer::BREAK_SMALL},
+             {BreakType::Big, peer::BREAK_BIG}}) {
+      const QByteArray bytes = ram->buildBreakStartPacket(now, expectedKind);
+      QVERIFY(!bytes.isEmpty());
+
+      const auto packet = peer::decodePacket(bytes, makeSecret());
+      QVERIFY(packet.has_value());
+      QCOMPARE(packet->eventType, uint8_t(peer::EVENT_BREAK_START));
+      QCOMPARE(packet->payload.size(), qsizetype(1));
+      QCOMPARE(static_cast<uint8_t>(packet->payload[0]), expectedKind);
+      (void)breakType;
+    }
+  }
+
+  void build_break_start_packet_empty_when_no_secret() {
+    // Construct a monitor without calling testSetSecret — m_secret is empty.
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(
+        new peer::RemoteActivityMonitor(m_prefs, m_idle));
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    QVERIFY(ram->buildBreakStartPacket(now, peer::BREAK_SMALL).isEmpty());
+  }
+
+  void receive_break_start_emits_peer_break_requested_small() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QByteArray peerUuid = makeUuid(0x77);
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    peer::Packet p;
+    p.senderUuid = peerUuid;
+    p.hostname = "hp";
+    p.timestamp = now.toSecsSinceEpoch();
+    p.nonce = 55;
+    p.eventType = peer::EVENT_BREAK_START;
+    p.payload = QByteArray(1, static_cast<char>(peer::BREAK_SMALL));
+    const QByteArray bytes = peer::encodePacket(p, makeSecret());
+
+    QSignalSpy spy(ram.get(), &peer::RemoteActivityMonitor::peerBreakRequested);
+    ram->handleReceivedDatagram(bytes, 3, now);
+
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.first().first().value<BreakType>(), BreakType::Small);
+  }
+
+  void receive_break_start_emits_peer_break_requested_big() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QByteArray peerUuid = makeUuid(0x78);
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    peer::Packet p;
+    p.senderUuid = peerUuid;
+    p.hostname = "hp";
+    p.timestamp = now.toSecsSinceEpoch();
+    p.nonce = 56;
+    p.eventType = peer::EVENT_BREAK_START;
+    p.payload = QByteArray(1, static_cast<char>(peer::BREAK_BIG));
+    const QByteArray bytes = peer::encodePacket(p, makeSecret());
+
+    QSignalSpy spy(ram.get(), &peer::RemoteActivityMonitor::peerBreakRequested);
+    ram->handleReceivedDatagram(bytes, 3, now);
+
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.first().first().value<BreakType>(), BreakType::Big);
+  }
+
+  void receive_break_start_does_not_mutate_peer_active_state() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QByteArray peerUuid = makeUuid(0x79);
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    peer::Packet p;
+    p.senderUuid = peerUuid;
+    p.hostname = "hp";
+    p.timestamp = now.toSecsSinceEpoch();
+    p.nonce = 57;
+    p.eventType = peer::EVENT_BREAK_START;
+    p.payload = QByteArray(1, static_cast<char>(peer::BREAK_SMALL));
+    const QByteArray bytes = peer::encodePacket(p, makeSecret());
+
+    QSignalSpy activitySpy(ram.get(),
+                           &peer::RemoteActivityMonitor::peerActivityChanged);
+    ram->handleReceivedDatagram(bytes, 3, now);
+
+    QCOMPARE(activitySpy.count(), 0);
+    QVERIFY(!ram->anyPeerActive());
+  }
+
+  void receive_break_start_loopback_dropped() {
+    auto ram = std::unique_ptr<peer::RemoteActivityMonitor>(makeMonitor());
+    const QDateTime now = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+
+    // Build a packet whose senderUuid matches ram's own uuid.
+    peer::Packet p;
+    p.senderUuid = ram->senderUuid();
+    p.hostname = "self";
+    p.timestamp = now.toSecsSinceEpoch();
+    p.nonce = 99;
+    p.eventType = peer::EVENT_BREAK_START;
+    p.payload = QByteArray(1, static_cast<char>(peer::BREAK_SMALL));
+    const QByteArray bytes = peer::encodePacket(p, makeSecret());
+
+    QSignalSpy spy(ram.get(), &peer::RemoteActivityMonitor::peerBreakRequested);
+    ram->handleReceivedDatagram(bytes, 3, now);
+
+    QCOMPARE(spy.count(), 0);
+  }
 };
 
 QTEST_MAIN(TestRemoteActivityMonitor)

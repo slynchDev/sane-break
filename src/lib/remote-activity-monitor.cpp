@@ -21,6 +21,17 @@ namespace peer {
 namespace {
 
 constexpr int kReplayWindowSeconds = 30;
+
+// BreakType (core/flags.h) ↔ BreakKind (peer-packet.h) conversion.
+// Any unrecognised wire byte is treated as BREAK_SMALL (the less-disruptive
+// default). The decoder already rejects bytes outside {0x00, 0x01}, so this
+// path is only a defensive fallback.
+uint8_t breakTypeToWire(BreakType t) {
+  return t == BreakType::Big ? BREAK_BIG : BREAK_SMALL;
+}
+BreakType breakTypeFromWire(uint8_t b) {
+  return b == BREAK_BIG ? BreakType::Big : BreakType::Small;
+}
 constexpr int kClockSkewToleranceSeconds = 5;
 constexpr int kTickIntervalMs = 1000;
 constexpr int kSendFailureWarnIntervalSeconds = 60;
@@ -252,6 +263,12 @@ void RemoteActivityMonitor::handleReceivedDatagram(const QByteArray& bytes,
     const uint8_t state = static_cast<uint8_t>(packet.payload[0]);
     ps.inMeeting = (state == MEETING_STARTED);
     ps.lastSeenMeetingTransition = now;
+  } else if (packet.eventType == EVENT_BREAK_START) {
+    // BREAK_START is a coordination signal only — it does NOT mutate
+    // lastSeenActive, lastSeenIdle, lastState, or any attribution counter.
+    // The break type is decoded and forwarded to SaneBreakApp via signal.
+    const uint8_t kind = static_cast<uint8_t>(packet.payload[0]);
+    emit peerBreakRequested(breakTypeFromWire(kind));
   }
 
   recomputeAnyPeerActive(now);
@@ -344,6 +361,27 @@ QByteArray RemoteActivityMonitor::buildMeetingTransitionPacket(
   p.eventType = EVENT_MEETING_TRANSITION;
   p.payload.append(static_cast<char>(state));
   return encodePacket(p, m_secret);
+}
+
+QByteArray RemoteActivityMonitor::buildBreakStartPacket(const QDateTime& now,
+                                                        uint8_t kind) const {
+  if (m_secret.isEmpty()) return {};
+  Packet p;
+  p.senderUuid = m_senderUuid;
+  p.hostname = QHostInfo::localHostName();
+  p.timestamp = now.toSecsSinceEpoch();
+  p.nonce = QRandomGenerator::global()->generate64();
+  p.eventType = EVENT_BREAK_START;
+  p.payload.append(static_cast<char>(kind));
+  return encodePacket(p, m_secret);
+}
+
+void RemoteActivityMonitor::broadcastBreakStart(BreakType type) {
+  if (!m_running) return;
+  const QDateTime now = QDateTime::currentDateTimeUtc();
+  QByteArray bytes = buildBreakStartPacket(now, breakTypeToWire(type));
+  if (bytes.isEmpty()) return;
+  sendToAllInterfaces(bytes, now);
 }
 
 void RemoteActivityMonitor::sendToAllInterfaces(const QByteArray& bytes,
