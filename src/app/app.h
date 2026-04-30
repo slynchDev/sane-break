@@ -69,4 +69,5 @@ class SaneBreakApp : public AbstractApp {
   void onPeerFusionToggled();
   void onPeerBindingChanged();
   void snapshotLastGoodPeerBinding();
+  void onPeerBreakRequested(BreakType type);
 };

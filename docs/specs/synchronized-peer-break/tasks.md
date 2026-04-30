@@ -122,7 +122,7 @@
 
 ## Phase 4: SaneBreakApp wiring
 
-- [ ] **4.1** Add gated `breakStart` → `broadcastBreakStart` connection
+- [x] **4.1** Add gated `breakStart` → `broadcastBreakStart` connection
   - In `src/app/app.cpp::SaneBreakApp::SaneBreakApp` constructor, inside the existing `if (m_ram) { ... }` block (next to the `breakStart` → `resetAttribution` connect at lines 75-76), add a second handler for `breakStart` that broadcasts a `BREAK_START` packet only when the current break was locally initiated. Implementation:
     ```cpp
     connect(this, &AppContext::breakStart, m_ram, [this]() {
@@ -136,7 +136,7 @@
   - _Depends: 2.3, 3.1_
   - _Spec: Requirements 1.3, 1.4, 3.2_
 
-- [ ] **4.2** Add `peerBreakRequested` consumer slot in `SaneBreakApp`
+- [x] **4.2** Add `peerBreakRequested` consumer slot in `SaneBreakApp`
   - In `src/app/app.h::SaneBreakApp`, declare:
     ```cpp
     private slots:
@@ -155,7 +155,7 @@
   - _Depends: 2.4, 3.1, 4.1_
   - _Spec: Requirements 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 4.2_
 
-- [ ] **4.3** Connect `peerBreakRequested` signal in constructor
+- [x] **4.3** Connect `peerBreakRequested` signal in constructor
   - In `src/app/app.cpp::SaneBreakApp::SaneBreakApp` constructor, inside the existing `if (m_ram) { ... }` block, add:
     ```cpp
     connect(m_ram, &peer::RemoteActivityMonitor::peerBreakRequested, this,

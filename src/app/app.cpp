@@ -94,6 +94,21 @@ SaneBreakApp::SaneBreakApp(const AppDependencies& deps, QObject* parent)
               else
                 onResumeRequest(PauseReason::PeerMeeting);
             });
+    // Synchronized peer break: broadcast BREAK_START when a locally-initiated
+    // break fires. Peer-triggered breaks set peerTriggered=true on the entering
+    // AppStateBreak, so the cast here guards against re-broadcasting (loop
+    // prevention per Requirement 3.2). Only runs when peerFusionEnabled=true
+    // because m_ram->start() is gated on that setting in SaneBreakApp::start().
+    connect(this, &AppContext::breakStart, this, [this]() {
+      if (!preferences->peerFusionEnabled->get()) return;
+      auto* breakState = dynamic_cast<AppStateBreak*>(m_currentState.get());
+      if (!breakState || breakState->peerTriggered) return;
+      m_ram->broadcastBreakStart(data->breakType());
+    });
+    // Receive: a peer's BREAK_START causes the local machine to enter a break
+    // immediately, regardless of where the local timer stands.
+    connect(m_ram, &peer::RemoteActivityMonitor::peerBreakRequested, this,
+            &SaneBreakApp::onPeerBreakRequested);
   }
 
   connect(this, &SaneBreakApp::trayDataUpdated, tray, &StatusTrayWindow::update);
@@ -281,6 +296,36 @@ void SaneBreakApp::openMeetingWindow() {
             });
   }
   showAndActivate(meetingWindow);
+}
+
+void SaneBreakApp::onPeerBreakRequested(BreakType type) {
+  // Peer-initiated breaks override postpone: postpone is a local affordance
+  // to delay the LOCAL timer and cannot negate the peer's signal that
+  // aggregate typing has hit the configured limit.
+  if (m_currentState->getID() == AppState::Break) return;  // already breaking
+  if (m_currentState->getID() == AppState::Meeting) return;  // meetings take priority
+
+  // Clear any active pause so the transition into AppStateBreak isn't blocked.
+  if (m_currentState->getID() == AppState::Paused) data->clearPauseReasons();
+
+  // If the peer requested a big break and big breaks are enabled locally,
+  // honour that intent. Otherwise fall through with a small break.
+  if (type == BreakType::Big && data->effectiveBigBreakEnabled()) {
+    data->makeNextBreakBig();
+  } else if (type == BreakType::Big) {
+    qDebug("Peer requested big break but big breaks are disabled locally; using small");
+  }
+
+  // Zero the local countdown so the tray shows the break as immediate rather
+  // than showing stale "next break in N min" text during the transition.
+  data->earlyBreak();
+
+  auto breakState = std::make_unique<AppStateBreak>();
+  breakState->peerTriggered = true;
+  transitionTo(std::move(breakState));
+  // AppStateBreak::enter() emits breakStart() synchronously. The gated
+  // broadcastBreakStart connect above sees peerTriggered=true and skips
+  // the outbound packet, preventing a break loop.
 }
 
 void SaneBreakApp::confirmQuit() {
