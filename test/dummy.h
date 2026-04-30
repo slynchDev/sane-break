@@ -62,6 +62,7 @@ class DummyBreakWindows : public AbstractBreakWindows {
   MOCK_METHOD(void, playEnterSound, (BreakType, SanePreferences*), ());
   MOCK_METHOD(void, playExitSound, (BreakType, SanePreferences*), ());
   MOCK_METHOD(void, showHeadsUp, (int, BreakType, SanePreferences*), ());
+  MOCK_METHOD(void, setHeadsUpTime, (int), ());
   MOCK_METHOD(void, hideHeadsUp, (), ());
 };
 
@@ -129,10 +130,10 @@ class DummyApp : public AbstractApp {
   void simulatePeerBreakRequest(BreakType type) {
     if (m_currentState->getID() == AppState::Break) return;
     if (m_currentState->getID() == AppState::Meeting) return;
-    if (m_currentState->getID() == AppState::Paused) data->clearPauseReasons();
-    if (type == BreakType::Big && data->effectiveBigBreakEnabled())
+    if (m_currentState->getID() == AppState::Paused) data->pause().clearReasons();
+    if (type == BreakType::Big && data->currentBreakConfig().bigEnabled)
       data->makeNextBreakBig();
-    data->earlyBreak();
+    data->schedule().earlyBreak();
     auto breakState = std::make_unique<AppStateBreak>();
     breakState->peerTriggered = true;
     transitionTo(std::move(breakState));

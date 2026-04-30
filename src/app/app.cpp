@@ -247,8 +247,8 @@ void SaneBreakApp::openStatsWindow() {
 }
 
 void SaneBreakApp::openFocusWindow() {
-  if (data->isFocusMode() || m_currentState->getID() == AppState::Meeting ||
-      data->isPostponing())
+  if (data->focus().isActive() || m_currentState->getID() == AppState::Meeting ||
+      data->schedule().isPostponing())
     return;
   if (!focusWindow) {
     focusWindow = new FocusWindow(preferences);
@@ -258,7 +258,7 @@ void SaneBreakApp::openFocusWindow() {
 }
 
 void SaneBreakApp::openPostponeWindow() {
-  if (data->isFocusMode()) {
+  if (data->focus().isActive()) {
     QMessageBox msgBox;
     msgBox.setText(tr("Cannot postpone during focus mode."));
     msgBox.setInformativeText(tr("End focus mode first if you want to postpone."));
@@ -267,7 +267,7 @@ void SaneBreakApp::openPostponeWindow() {
     msgBox.exec();
     return;
   }
-  if (data->isPostponing()) {
+  if (data->schedule().isPostponing()) {
     QMessageBox msgBox;
     msgBox.setText(tr("You have already postponed this break once."));
     msgBox.setInformativeText(tr("No further postpones are allowed."));
@@ -306,11 +306,11 @@ void SaneBreakApp::onPeerBreakRequested(BreakType type) {
   if (m_currentState->getID() == AppState::Meeting) return;  // meetings take priority
 
   // Clear any active pause so the transition into AppStateBreak isn't blocked.
-  if (m_currentState->getID() == AppState::Paused) data->clearPauseReasons();
+  if (m_currentState->getID() == AppState::Paused) data->pause().clearReasons();
 
   // If the peer requested a big break and big breaks are enabled locally,
   // honour that intent. Otherwise fall through with a small break.
-  if (type == BreakType::Big && data->effectiveBigBreakEnabled()) {
+  if (type == BreakType::Big && data->currentBreakConfig().bigEnabled) {
     data->makeNextBreakBig();
   } else if (type == BreakType::Big) {
     qDebug("Peer requested big break but big breaks are disabled locally; using small");
@@ -318,7 +318,7 @@ void SaneBreakApp::onPeerBreakRequested(BreakType type) {
 
   // Zero the local countdown so the tray shows the break as immediate rather
   // than showing stale "next break in N min" text during the transition.
-  data->earlyBreak();
+  data->schedule().earlyBreak();
 
   auto breakState = std::make_unique<AppStateBreak>();
   breakState->peerTriggered = true;

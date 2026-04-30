@@ -62,7 +62,7 @@ class AppContext;
 //   new system events as virtual methods here.
 class AppState {
  public:
-  enum StateID { Normal, Paused, Break, Meeting };
+  enum StateID { Normal, Paused, Break, PostBreakIdle, Meeting };
   virtual StateID getID() = 0;
   virtual void enter(AppContext*) {};
   virtual void exit(AppContext*) {};
@@ -102,14 +102,9 @@ class AppContext : public QObject {
   void checkBreakReadiness();
 
  signals:
-  // Emitted from AppStateBreak::enter() / AppStateBreak::exit() so peer-aware
-  // code (e.g. RemoteActivityMonitor) can reset per-peer attribution counters
-  // on break transitions without coupling AppStateBreak to peer logic.
+  void appStateChanged();
   void breakStart();
   void breakEnd();
-  // Phase 14 — emitted from AppStateMeeting::enter() / AppStateMeeting::exit()
-  // so the peer fusion layer can broadcast MEETING_TRANSITION packets without
-  // coupling AppStateMeeting to peer logic.
   void meetingStart();
   void meetingEnd();
 
@@ -147,7 +142,12 @@ class AppStatePaused : public AppState {
   void onIdleStart(AppContext* app) override;
   void onIdleEnd(AppContext* app) override;
   void onMenuAction(AppContext* app, MenuAction action) override;
+  void onPauseRequest(AppContext* app, PauseReasons reasons) override;
   void onResumeRequest(AppContext* app, PauseReasons reasons) override;
+
+ protected:
+  QString m_currentSpanType;
+  PauseReasons m_currentSpanReasons = {};
 };
 
 class BreakPhase;
@@ -156,6 +156,10 @@ class BreakPhase;
 class AppStateBreak : public AppState {
  public:
   void transitionTo(AppContext* app, std::unique_ptr<BreakPhase> phase);
+  BreakCompletion completeBreak(AppContext* app);
+  void preserveBreakWindowsOnExit(bool preserve) {
+    m_preserveBreakWindowsOnExit = preserve;
+  }
 
   StateID getID() override { return Break; };
   void enter(AppContext* app) override;
@@ -177,6 +181,7 @@ class AppStateBreak : public AppState {
 
  protected:
   std::unique_ptr<BreakPhase> m_currentPhase;
+  bool m_preserveBreakWindowsOnExit = false;
 };
 
 // Base class for break phases (prompt, fullscreen, post-break)
@@ -212,11 +217,22 @@ class BreakPhaseFullScreen : public BreakPhase {
   void showWindowClickableWidgets(AppContext* app, AppStateBreak* breakState);
 };
 
-// Post-break phase: Keeps window open after break completion until user activity
-class BreakPhasePost : public BreakPhase {
+class AppStatePostBreakIdle : public AppState {
  public:
-  void enter(AppContext* app, AppStateBreak* breakState) override;
-  void onIdleEnd(AppContext* app, AppStateBreak* breakState) override;
+  explicit AppStatePostBreakIdle(bool keepWindowOpen = false)
+      : m_keepWindowOpen(keepWindowOpen) {}
+
+  StateID getID() override { return PostBreakIdle; }
+  void enter(AppContext* app) override;
+  void exit(AppContext* app) override;
+  void tick(AppContext* app) override;
+  void onIdleEnd(AppContext* app) override;
+  bool onSleepEnd(AppContext* app, int sleptSeconds) override;
+
+ protected:
+  void finalize(AppContext* app);
+
+  bool m_keepWindowOpen = false;
 };
 
 // Meeting state: break schedule suspended during a meeting/presentation

@@ -47,6 +47,7 @@ AbstractApp::AbstractApp(const AppDependencies& deps, QObject* parent)
   if (!m_systemMonitor->parent()) m_systemMonitor->setParent(this);
 
   connect(data, &AppData::changed, this, &AbstractApp::updateTray);
+  connect(this, &AppContext::appStateChanged, this, &AbstractApp::updateTray);
   connect(m_systemMonitor, &AbstractSystemMonitor::sleepEnded, this,
           &AbstractApp::onSleepEnd);
   connect(m_systemMonitor, &AbstractSystemMonitor::pauseRequested, this,
@@ -72,7 +73,7 @@ AbstractApp::AbstractApp(const AppDependencies& deps, QObject* parent)
   });
   connect(m_systemMonitor, &AbstractSystemMonitor::meetingAppStopped, this, [this]() {
     if (m_currentState->getID() == AppState::Meeting &&
-        data->isMeetingIndefinite()) {
+        data->meeting().isIndefinite()) {
       endMeetingBreakLater(preferences->smallEvery->get());
     }
   });
@@ -80,7 +81,9 @@ AbstractApp::AbstractApp(const AppDependencies& deps, QObject* parent)
   connect(preferences->pauseOnBattery, &SettingWithSignal::changed, this,
           &AbstractApp::onBatterySettingChange);
   connect(preferences->smallEvery, &SettingWithSignal::changed, this, [this]() {
-    if (!this->data->isFocusMode()) this->data->resetSecondsToNextBreak();
+    if (!this->data->focus().isActive()) {
+      this->data->schedule().resetSecondsToNextBreak(this->data->currentBreakConfig());
+    }
   });
 
   connect(meetingPrompt, &AbstractMeetingPrompt::breakNowRequested, this,
@@ -94,38 +97,38 @@ AbstractApp::AbstractApp(const AppDependencies& deps, QObject* parent)
 void AbstractApp::start() {
   db->logEvent("app::start");
   transitionTo(std::make_unique<AppStateNormal>());
-  updateTray();
   idleTimer->startWatching();
   m_countDownTimer->start();
   m_systemMonitor->start();
 }
 
 void AbstractApp::updateTray() {
-  bool bigEnabled = data->effectiveBigBreakEnabled();
-  int secondsFromLastBreakToNext = data->effectiveSmallEvery();
+  BreakConfig config = data->currentBreakConfig();
+  bool bigEnabled = config.bigEnabled;
+  int secondsFromLastBreakToNext = config.smallEvery;
   int secondsToNextBigBreak = 0;
   if (bigEnabled) {
     secondsToNextBigBreak =
-        data->secondsToNextBreak() +
+        data->schedule().secondsToNextBreak() +
         data->smallBreaksBeforeBigBreak() * secondsFromLastBreakToNext;
   }
   TrayData trayData = {
-      .isBreaking = data->secondsToNextBreak() == 0,
-      .secondsToNextBreak = data->secondsToNextBreak(),
+      .isBreaking = m_currentState && m_currentState->getID() == AppState::Break,
+      .secondsToNextBreak = data->schedule().secondsToNextBreak(),
       .secondsToNextBigBreak = secondsToNextBigBreak,
       .secondsFromLastBreakToNext = secondsFromLastBreakToNext,
       .smallBreaksBeforeBigBreak = data->smallBreaksBeforeBigBreak(),
       .bigBreakEnabled = bigEnabled,
-      .pauseReasons = data->pauseReasons(),
-      .isInMeeting = data->isInMeeting(),
-      .isMeetingIndefinite = data->isMeetingIndefinite(),
-      .meetingSecondsRemaining = data->meetingSecondsRemaining(),
-      .meetingTotalSeconds = data->meetingTotalSeconds(),
-      .meetingReason = data->meetingReason(),
-      .isPostponing = data->isPostponing(),
-      .isFocusMode = data->isFocusMode(),
-      .focusCyclesRemaining = data->focusCyclesRemaining(),
-      .focusTotalCycles = data->focusTotalCycles(),
+      .pauseReasons = data->pause().reasons(),
+      .isInMeeting = data->meeting().isActive(),
+      .isMeetingIndefinite = data->meeting().isIndefinite(),
+      .meetingSecondsRemaining = data->meeting().secondsRemaining(),
+      .meetingTotalSeconds = data->meeting().totalSeconds(),
+      .meetingReason = data->meeting().reason(),
+      .isPostponing = data->schedule().isPostponing(),
+      .isFocusMode = data->focus().isActive(),
+      .focusCyclesRemaining = data->focus().cyclesRemaining(),
+      .focusTotalCycles = data->focus().totalCycles(),
   };
   emit trayDataUpdated(trayData);
 }
@@ -136,15 +139,15 @@ void AbstractApp::enableBreak() { onMenuAction(Action::EnableBreaks{}); }
 void AbstractApp::smallBreakInstead() { onMenuAction(Action::SmallBreakInstead{}); }
 
 void AbstractApp::startFocus(int totalCycles, const QString& reason) {
-  if (data->isFocusMode() || m_currentState->getID() == AppState::Meeting) return;
-  data->setFocusSpanId(
+  if (data->focus().isActive() || m_currentState->getID() == AppState::Meeting) return;
+  data->focus().setSpanId(
       db->openSpan("focus", {{"totalCycles", totalCycles}, {"reason", reason}}));
-  data->startFocusMode(totalCycles);
-  data->resetPostpone();
+  data->focus().start(totalCycles);
+  data->schedule().resetPostpone();
   if (m_currentState->getID() == AppState::Break) {
     onMenuAction(Action::ReenterBreak{});
   } else {
-    data->earlyBreak();
+    data->schedule().earlyBreak();
     transitionTo(std::make_unique<AppStateBreak>());
   }
 }
@@ -162,15 +165,15 @@ void AbstractApp::startIndefiniteMeeting(const QString& reason) {
 void AbstractApp::startMeetingInternal(int seconds, const QString& reason,
                                        bool indefinite) {
   if (m_currentState->getID() == AppState::Meeting) return;
-  data->resetPostpone();
-  if (data->isFocusMode()) {
-    db->closeSpan(data->focusSpanId(), {{"reason", "meeting"}});
-    data->endFocusMode();
+  data->schedule().resetPostpone();
+  if (data->focus().isActive()) {
+    db->closeSpan(data->focus().spanId(), {{"reason", "meeting"}});
+    data->focus().end();
   }
   if (indefinite) {
-    data->setIndefiniteMeetingData(reason);
+    data->meeting().setIndefinite(reason);
   } else {
-    data->setMeetingData(seconds, seconds, reason);
+    data->meeting().set(seconds, seconds, reason);
   }
   transitionTo(std::make_unique<AppStateMeeting>());
 }
@@ -187,11 +190,12 @@ void AbstractApp::extendMeeting(int seconds) {
 
 void AbstractApp::postpone(int seconds) {
   // This is defensive. This should already be handled by App.
-  if (data->isPostponing() || data->isFocusMode()) return;
+  if (data->schedule().isPostponing() || data->focus().isActive()) return;
   db->logEvent("postpone", {{"seconds", seconds}});
   // Exit current break if we are postponing breaks
   transitionTo(std::make_unique<AppStateNormal>());
-  data->postpone(seconds);
+  data->schedule().postpone(seconds);
+  checkBreakReadiness();
 }
 
 void AbstractApp::onBatterySettingChange() {

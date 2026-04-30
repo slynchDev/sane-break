@@ -5,7 +5,10 @@
 #include <gmock/gmock.h>
 #include <qtestcase.h>
 
+#include <QDateTime>
 #include <QObject>
+#include <QSignalSpy>
+#include <QSqlQuery>
 #include <QTest>
 #include <QTimer>
 
@@ -15,6 +18,14 @@
 #include "gmock/gmock.h"
 
 using testing::Mock, testing::NiceMock, testing::_;
+
+static int sumTrackedSeconds(BreakDatabase* db, const QDate& from, const QDate& to) {
+  int total = 0;
+  for (const auto& stats : db->queryDailyUsageStats(from, to)) {
+    total += stats.trackedSeconds;
+  }
+  return total;
+}
 
 class TestApp : public QObject {
   Q_OBJECT
@@ -188,6 +199,136 @@ class TestApp : public QObject {
     app.advance(1);
     QCOMPARE(app.trayData.secondsToNextBreak, secondsToNextBreak - 1);
   }
+  void long_post_break_idle_resets_cycle_data() {
+    QTest::addColumn<bool>("autoCloseWindow");
+    QTest::newRow("auto-close") << true;
+    QTest::newRow("keep-window-open") << false;
+  }
+  void long_post_break_idle_resets_cycle() {
+    QFETCH(bool, autoCloseWindow);
+    deps.preferences->autoCloseWindowAfterSmallBreak->set(autoCloseWindow);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak,
+             deps.preferences->bigAfter->get() - 1);
+
+    app.breakNow();
+    deps.idleTimer->setIdle(true);
+    app.advanceToBreakEnd();
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak,
+             deps.preferences->bigAfter->get() - 2);
+
+    app.advance(deps.preferences->resetCycleAfterPause->get() + 1);
+    deps.idleTimer->setIdle(false);
+
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak,
+             deps.preferences->bigAfter->get() - 1);
+    QVERIFY(!app.trayData.pauseReasons);
+  }
+  void short_post_break_idle_does_not_reset_cycle_data() {
+    QTest::addColumn<bool>("autoCloseWindow");
+    QTest::newRow("auto-close") << true;
+    QTest::newRow("keep-window-open") << false;
+  }
+  void short_post_break_idle_does_not_reset_cycle() {
+    QFETCH(bool, autoCloseWindow);
+    deps.preferences->autoCloseWindowAfterSmallBreak->set(autoCloseWindow);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+    int threshold = deps.preferences->bigFor->get() - deps.preferences->smallFor->get();
+
+    app.breakNow();
+    deps.idleTimer->setIdle(true);
+    app.advanceToBreakEnd();
+    app.advance(threshold > 0 ? threshold - 1 : 0);
+    deps.idleTimer->setIdle(false);
+
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak,
+             deps.preferences->bigAfter->get() - 2);
+  }
+  void post_break_idle_cycle_reset_uses_big_minus_small() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    int threshold = deps.preferences->bigFor->get() - deps.preferences->smallFor->get();
+    QVERIFY(threshold < deps.preferences->resetCycleAfterPause->get());
+
+    app.breakNow();
+    deps.idleTimer->setIdle(true);
+    app.advanceToBreakEnd();
+    app.advance(threshold + 1);
+    deps.idleTimer->setIdle(false);
+
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak,
+             deps.preferences->bigAfter->get() - 1);
+  }
+  void long_post_break_idle_undoes_postpone_shrink_data() {
+    QTest::addColumn<bool>("autoCloseWindow");
+    QTest::newRow("auto-close") << true;
+    QTest::newRow("keep-window-open") << false;
+  }
+  void long_post_break_idle_undoes_postpone_shrink() {
+    QFETCH(bool, autoCloseWindow);
+    deps.preferences->autoCloseWindowAfterSmallBreak->set(autoCloseWindow);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    int smallEvery = deps.preferences->smallEvery->get();
+    app.postpone(100);
+    app.advance(app.trayData.secondsToNextBreak);
+    deps.idleTimer->setIdle(true);
+    app.advanceToBreakEnd();
+    QCOMPARE(app.trayData.secondsToNextBreak, smallEvery - 100);
+
+    app.advance(deps.preferences->resetCycleAfterPause->get() + 1);
+    deps.idleTimer->setIdle(false);
+
+    QCOMPARE(app.trayData.secondsToNextBreak, smallEvery);
+  }
+  void short_post_break_idle_keeps_postpone_shrink_data() {
+    QTest::addColumn<bool>("autoCloseWindow");
+    QTest::newRow("auto-close") << true;
+    QTest::newRow("keep-window-open") << false;
+  }
+  void short_post_break_idle_keeps_postpone_shrink() {
+    QFETCH(bool, autoCloseWindow);
+    deps.preferences->autoCloseWindowAfterSmallBreak->set(autoCloseWindow);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    int smallEvery = deps.preferences->smallEvery->get();
+    app.postpone(100);
+    app.advance(app.trayData.secondsToNextBreak);
+    deps.idleTimer->setIdle(true);
+    app.advanceToBreakEnd();
+    app.advance(deps.preferences->resetCycleAfterPause->get() - 1);
+    deps.idleTimer->setIdle(false);
+
+    QCOMPARE(app.trayData.secondsToNextBreak, smallEvery - 100);
+  }
+  void finalize_pending_post_break_emits_once() {
+    AppData data(nullptr, deps.preferences);
+    data.makeNextBreakBig();
+    data.schedule().setSecondsToNextBreak(123);
+    data.postBreak().setPending({
+        .completedBreakType = BreakType::Small,
+        .wasPostponed = true,
+        .cycleResetThresholdSeconds = 0,
+        .nextSessionBaseSeconds = 500,
+        .nextSessionAdjustedSeconds = 400,
+    });
+
+    QSignalSpy spy(&data, &AppData::changed);
+    spy.clear();
+
+    data.finalizePendingPostBreak(true, false);
+
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(data.schedule().secondsToNextBreak(), 400);
+    QCOMPARE(data.smallBreaksBeforeBigBreak(), deps.preferences->bigAfter->get() - 1);
+    QVERIFY(!data.postBreak().isActive());
+  }
   void lock_screen_timer_running() {
     int autoScreenLockSeconds = 20;
     deps.preferences->autoScreenLock->set(autoScreenLockSeconds);
@@ -290,6 +431,18 @@ class TestApp : public QObject {
     QCOMPARE(app.trayData.secondsToNextBreak, secondsToNextBreak - 100);
     app.postpone(300);
     QCOMPARE(app.trayData.secondsToNextBreak, secondsToNextBreak + 200);
+  }
+  void early_break_clears_effective_postpone() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    app.postpone(100);
+    QVERIFY(app.trayData.isPostponing);
+
+    app.breakNow();
+
+    QVERIFY(app.trayData.isBreaking);
+    QVERIFY(!app.trayData.isPostponing);
   }
   // During the pause, the count down should not change, and state should be reflected
   void pause_break_on_idle() {
@@ -931,6 +1084,81 @@ class TestApp : public QObject {
     // Should remain paused
     QCOMPARE(app.trayData.pauseReasons, PauseReason::Idle);
   }
+  void sleep_end_while_normal_splits_span_in_db() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    QDateTime fakeStart = QDateTime::currentDateTimeUtc().addSecs(-7200);
+    QString fakeStartStr = fakeStart.toUTC().toString(Qt::ISODate);
+
+    app.closeCurrentSpan();
+    app.openCurrentSpan("normal", {}, fakeStart);
+
+    emit deps.systemMonitor->sleepEnded(3600);
+
+    QSqlQuery normalQuery;
+    normalQuery.prepare(
+        "SELECT ended_at FROM spans WHERE type = 'normal' AND started_at = ?");
+    normalQuery.addBindValue(fakeStartStr);
+    QVERIFY(normalQuery.exec());
+    QVERIFY(normalQuery.next());
+    QString normalEndedAt = normalQuery.value(0).toString();
+    QVERIFY(!normalEndedAt.isEmpty());
+
+    QSqlQuery sleepQuery;
+    QVERIFY(sleepQuery.exec(
+        "SELECT started_at, ended_at FROM spans WHERE type = 'sleep' ORDER BY id DESC "
+        "LIMIT 1"));
+    QVERIFY(sleepQuery.next());
+    QString sleepStartedAt = sleepQuery.value(0).toString();
+    QString sleepEndedAt = sleepQuery.value(1).toString();
+
+    QCOMPARE(normalEndedAt, sleepStartedAt);
+    QVERIFY(!sleepEndedAt.isEmpty());
+
+    QSqlQuery openNormalQuery;
+    QVERIFY(openNormalQuery.exec(
+        "SELECT COUNT(*) FROM spans WHERE type = 'normal' AND ended_at IS NULL"));
+    QVERIFY(openNormalQuery.next());
+    QCOMPARE(openNormalQuery.value(0).toInt(), 1);
+  }
+  void sleep_end_while_normal_omits_slept_time_from_usage_stats() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    QDateTime now = QDateTime::currentDateTimeUtc();
+    QDateTime fakeStart = now.addSecs(-7200);
+
+    app.closeCurrentSpan();
+    app.openCurrentSpan("normal", {}, fakeStart);
+
+    emit deps.systemMonitor->sleepEnded(3600);
+
+    QDate from = fakeStart.toLocalTime().date();
+    QDate to = now.toLocalTime().date();
+    int trackedSeconds = sumTrackedSeconds(deps.db, from, to);
+
+    QVERIFY2(trackedSeconds >= 3500, "tracked time should keep the pre-sleep hour");
+    QVERIFY2(trackedSeconds < 5400, "tracked time should not include the slept hour");
+  }
+  void sleep_during_post_break_idle_counts_as_inactivity() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    int smallEvery = deps.preferences->smallEvery->get();
+    app.postpone(100);
+    app.advance(app.trayData.secondsToNextBreak);
+    deps.idleTimer->setIdle(true);
+    app.advanceToBreakEnd();
+
+    emit deps.systemMonitor->sleepEnded(deps.preferences->resetCycleAfterPause->get() +
+                                        1);
+    deps.idleTimer->setIdle(false);
+
+    QCOMPARE(app.trayData.secondsToNextBreak, smallEvery);
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak,
+             deps.preferences->bigAfter->get() - 1);
+  }
   // Multiple pause reasons should work
   void more_than_one_pause_reasons() {
     deps.preferences->pauseOnBattery->set(true);
@@ -959,6 +1187,43 @@ class TestApp : public QObject {
     app.advance(1);
     QCOMPARE(app.trayData.secondsToNextBreak, secondsToNextBreak - 1);
     QVERIFY(!app.trayData.pauseReasons);
+  }
+  void pause_spans_rotate_from_paused_to_away_and_back() {
+    deps.preferences->pauseOnBattery->set(true);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    emit deps.systemMonitor->pauseRequested(PauseReason::OnBattery);
+    deps.idleTimer->setIdle(true);
+    deps.idleTimer->setIdle(false);
+    emit deps.systemMonitor->resumeRequested(PauseReason::OnBattery);
+
+    QSqlQuery query;
+    QVERIFY(query.exec(R"(
+      SELECT type,
+             json_extract(data, '$.reasons[0]'),
+             json_extract(data, '$.reasons[1]')
+      FROM spans
+      WHERE type IN ('paused', 'away')
+      ORDER BY id
+    )"));
+
+    QVERIFY(query.next());
+    QCOMPARE(query.value(0).toString(), QString("paused"));
+    QCOMPARE(query.value(1).toString(), QString("idle"));
+    QCOMPARE(query.value(2).toString(), QString("on-battery"));
+
+    QVERIFY(query.next());
+    QCOMPARE(query.value(0).toString(), QString("away"));
+    QCOMPARE(query.value(1).toString(), QString("idle"));
+    QCOMPARE(query.value(2).toString(), QString("on-battery"));
+
+    QVERIFY(query.next());
+    QCOMPARE(query.value(0).toString(), QString("paused"));
+    QCOMPARE(query.value(1).toString(), QString("on-battery"));
+    QVERIFY(!query.value(2).isValid() || query.value(2).toString().isEmpty());
+
+    QVERIFY(!query.next());
   }
   /* We disallow pausing duing postponing because:
    * 1. this will almost not happen, so we can simplify things.
@@ -1082,7 +1347,7 @@ class TestApp : public QObject {
     QVERIFY(!app.trayData.isFocusMode);
     QCOMPARE(app.trayData.secondsToNextBreak, deps.preferences->smallEvery->get());
   }
-  // Postpone blocked during focus
+  // Postpone prevented during focus
   void focus_mode_no_postpone() {
     deps.preferences->focusSmallEvery->set(600);
     deps.preferences->focusSmallFor->set(10);
@@ -1095,7 +1360,7 @@ class TestApp : public QObject {
     int secondsToNextBreak = app.trayData.secondsToNextBreak;
 
     app.postpone(100);
-    // Postpone should be blocked
+    // Postpone should be prevented
     QCOMPARE(app.trayData.secondsToNextBreak, secondsToNextBreak);
   }
   // Starting meeting clears focus
@@ -1114,7 +1379,7 @@ class TestApp : public QObject {
     QVERIFY(!app.trayData.isFocusMode);
     QVERIFY(app.trayData.isInMeeting);
   }
-  // breakCycleCount increments during focus and carries over after focus ends
+  // Focus keeps a separate cycle; normal-cycle progress resumes unchanged after focus
   void focus_mode_shared_cycle() {
     deps.preferences->focusSmallEvery->set(600);
     deps.preferences->focusSmallFor->set(10);
@@ -1127,7 +1392,7 @@ class TestApp : public QObject {
              deps.preferences->bigAfter->get() - 1);
 
     app.startFocus(2, "deep work");
-    // Entry break (no cycle decrement, but breakCycleCount increments)
+    // Entry break advances focus cycle, not normal cycle
     app.advanceToBreakEnd();
     // First real focus break (cycle decrement: 2→1)
     app.advance(app.trayData.secondsToNextBreak);
@@ -1138,7 +1403,59 @@ class TestApp : public QObject {
     app.advanceToBreakEnd();
     // Focus ended, back to normal schedule
     QVERIFY(!app.trayData.isFocusMode);
-    // After 3 breaks from cycle 1 with bigAfter=3, cycle wraps: 2 small before big
+    // Normal cycle progress resumes where it was before focus started.
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak,
+             deps.preferences->bigAfter->get() - 1);
+  }
+  void focus_mode_big_break_cycle_is_independent() {
+    deps.preferences->focusSmallEvery->set(600);
+    deps.preferences->focusSmallFor->set(10);
+    deps.preferences->focusBigBreakEnabled->set(true);
+    deps.preferences->focusBigAfter->set(2);
+    deps.preferences->focusBigFor->set(20);
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    int normalSmallBreaksBeforeBig = app.trayData.smallBreaksBeforeBigBreak;
+
+    EXPECT_CALL(*deps.breakWindows, create(BreakType::Small, _, _, _)).Times(1);
+    app.startFocus(1, "deep work");
+    QVERIFY(Mock::VerifyAndClearExpectations(deps.breakWindows));
+    app.advanceToBreakEnd();
+
+    // Focus entry break advances the focus-only cycle, so the next focus break is big.
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak, 0);
+
+    EXPECT_CALL(*deps.breakWindows, create(BreakType::Big, _, _, _)).Times(1);
+    app.advance(app.trayData.secondsToNextBreak);
+    QVERIFY(Mock::VerifyAndClearExpectations(deps.breakWindows));
+    app.advanceToBreakEnd();
+
+    QVERIFY(!app.trayData.isFocusMode);
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak, normalSmallBreaksBeforeBig);
+  }
+  void reducing_big_after_keeps_completed_small_break_progress() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    app.advance(app.trayData.secondsToNextBreak);
+    app.advanceToBreakEnd();
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak, 1);
+
+    deps.preferences->bigAfter->set(2);
+
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak, 0);
+  }
+  void increasing_big_after_keeps_completed_small_break_progress() {
+    NiceMock<DummyApp> app(deps);
+    app.start();
+
+    app.advance(app.trayData.secondsToNextBreak);
+    app.advanceToBreakEnd();
+    QCOMPARE(app.trayData.smallBreaksBeforeBigBreak, 1);
+
+    deps.preferences->bigAfter->set(4);
+
     QCOMPARE(app.trayData.smallBreaksBeforeBigBreak, 2);
   }
   // Tray data reflects focus state

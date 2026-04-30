@@ -4,8 +4,6 @@
 
 #include "core/app-data.h"
 
-#include <QDateTime>
-#include <QObject>
 #include <algorithm>
 
 #include "core/flags.h"
@@ -13,232 +11,455 @@
 
 AppData::AppData(QObject* parent, SanePreferences* preferences)
     : QObject(parent), preferences(preferences) {
-  m_secondsToNextBreak = preferences->smallEvery->get();
+  auto notifyChanged = [this]() { emit changed(); };
+  m_schedule.setOnChanged(notifyChanged);
+  m_pause.setOnChanged(notifyChanged);
+  m_meeting.setOnChanged(notifyChanged);
+  m_focus.setOnChanged(notifyChanged);
+  m_schedule.init(preferences->smallEvery->get());
+
+  connect(preferences->bigBreakEnabled, &SettingWithSignal::changed, this,
+          &AppData::changed);
+  connect(preferences->bigAfter, &SettingWithSignal::changed, this, &AppData::changed);
+  connect(preferences->focusSmallEvery, &SettingWithSignal::changed, this,
+          &AppData::changed);
+  connect(preferences->focusBigBreakEnabled, &SettingWithSignal::changed, this,
+          &AppData::changed);
+  connect(preferences->focusBigAfter, &SettingWithSignal::changed, this,
+          &AppData::changed);
 }
 
-BreakType AppData::breakType() {
-  if (!effectiveBigBreakEnabled()) return BreakType::Small;
-  return smallBreaksBeforeBigBreak() == 0 ? BreakType::Big : BreakType::Small;
-};
+void BreakScheduleState::setOnChanged(std::function<void()> onChanged) {
+  m_onChanged = std::move(onChanged);
+}
+void BreakScheduleState::init(int secondsToNextBreak) {
+  m_secondsToNextBreak = secondsToNextBreak;
+  m_completedSmallBreaks = 0;
+  m_postponeData.reset();
+}
+int BreakScheduleState::secondsToNextBreak() const { return m_secondsToNextBreak; }
+void BreakScheduleState::tickSecondsToNextBreak() {
+  m_secondsToNextBreak--;
+  notifyChanged();
+}
+void BreakScheduleState::resetSecondsToNextBreak(const BreakConfig& config,
+                                                 bool notify) {
+  m_secondsToNextBreak = config.smallEvery;
+  if (notify) notifyChanged();
+}
+void BreakScheduleState::setSecondsToNextBreak(int secs, bool notify) {
+  m_secondsToNextBreak = secs;
+  if (notify) notifyChanged();
+}
+void BreakScheduleState::refillSecondsToNextBreak(const BreakConfig& config) {
+  if (m_secondsToNextBreak < config.smallEvery) {
+    m_secondsToNextBreak = config.smallEvery;
+    notifyChanged();
+  }
+}
+void BreakScheduleState::postpone(int secs) {
+  m_secondsToNextBreak += secs;
+  m_postponeData.plannedSecondsToPostpone = secs;
+  notifyChanged();
+}
+bool BreakScheduleState::isPostponing() const { return m_postponeData.isPostponing(); }
+int BreakScheduleState::secondsPostponed() const {
+  return m_postponeData.secondsPostponed();
+}
+void BreakScheduleState::resetPostpone(bool notify) {
+  m_postponeData.reset();
+  if (notify) notifyChanged();
+}
+void BreakScheduleState::earlyBreak() {
+  if (m_postponeData.isPostponing()) {
+    m_postponeData.actualSecondsToNextBreakWhenBreak = m_secondsToNextBreak;
+  }
+  m_secondsToNextBreak = 0;
+  notifyChanged();
+}
+bool BreakScheduleState::isBreakExtendedByPostpone() const {
+  return m_postponeData.secondsPostponed() > 0;
+}
+int BreakScheduleState::smallBreaksBeforeBigBreak(const BreakConfig& config) const {
+  if (!config.bigEnabled) return -1;
+  return std::max(0, config.bigAfter - 1 - m_completedSmallBreaks);
+}
+BreakType BreakScheduleState::breakType(const BreakConfig& config) const {
+  if (!config.bigEnabled) return BreakType::Small;
+  return smallBreaksBeforeBigBreak(config) == 0 ? BreakType::Big : BreakType::Small;
+}
+int BreakScheduleState::breakDuration(const BreakConfig& config,
+                                      int postponeExtendBreakPercent) const {
+  int totalSeconds =
+      breakType(config) == BreakType::Big ? config.bigFor : config.smallFor;
+  int breakForReference = config.bigEnabled ? config.bigFor : config.smallFor;
+  totalSeconds += postponeExtendBreakPercent * m_postponeData.secondsPostponed() *
+                  breakForReference / config.smallEvery / 100;
+  return totalSeconds;
+}
+void BreakScheduleState::resetCycle(bool notify) {
+  m_completedSmallBreaks = 0;
+  if (notify) notifyChanged();
+}
+void BreakScheduleState::makeNextBreakBig(const BreakConfig& config, bool notify) {
+  m_completedSmallBreaks = std::max(0, config.bigAfter - 1);
+  if (notify) notifyChanged();
+}
+void BreakScheduleState::makeNextBreakLastSmallBeforeBig(const BreakConfig& config,
+                                                         bool notify) {
+  m_completedSmallBreaks = std::max(0, config.bigAfter - 2);
+  if (notify) notifyChanged();
+}
+void BreakScheduleState::recordCompletedBreak(BreakType completedBreakType,
+                                              bool notify) {
+  if (completedBreakType == BreakType::Big) {
+    m_completedSmallBreaks = 0;
+  } else {
+    m_completedSmallBreaks++;
+  }
+  if (notify) notifyChanged();
+}
+const PostponeData& BreakScheduleState::postponeData() const { return m_postponeData; }
+void BreakScheduleState::notifyChanged() {
+  if (m_onChanged) m_onChanged();
+}
 
-int AppData::smallBreaksBeforeBigBreak() {
-  if (!effectiveBigBreakEnabled()) return -1;
-  int breakEvery = effectiveBigAfter();
-  m_breakCycleCount %= breakEvery;
-  return (breakEvery - m_breakCycleCount) % breakEvery;
-};
-void AppData::finishAndStartNextCycle() {
-  m_breakCycleCount++;
-  if (m_focusData.isActive) {
-    if (m_focusData.entryBreakDone) {
-      m_focusData.cyclesRemaining--;
-      if (m_focusData.cyclesRemaining <= 0) m_focusData.clear();
-    } else {
-      m_focusData.entryBreakDone = true;
+void PauseState::setOnChanged(std::function<void()> onChanged) {
+  m_onChanged = std::move(onChanged);
+}
+int PauseState::secondsPaused() const { return m_secondsPaused; }
+void PauseState::tickSecondsPaused() { addSecondsPaused(1); }
+void PauseState::addSecondsPaused(int secs) {
+  m_secondsPaused += secs;
+  notifyChanged();
+}
+void PauseState::resetSecondsPaused() {
+  m_secondsPaused = 0;
+  notifyChanged();
+}
+PauseReasons PauseState::reasons() const { return m_reasons; }
+void PauseState::addReasons(PauseReasons reasons) {
+  m_reasons |= reasons;
+  notifyChanged();
+}
+void PauseState::removeReasons(PauseReasons reasons) {
+  m_reasons &= ~reasons;
+  notifyChanged();
+}
+void PauseState::clearReasons() {
+  m_reasons = PauseReasons::fromInt(0);
+  notifyChanged();
+}
+void PauseState::notifyChanged() {
+  if (m_onChanged) m_onChanged();
+}
+
+void MeetingState::setOnChanged(std::function<void()> onChanged) {
+  m_onChanged = std::move(onChanged);
+}
+bool MeetingState::isActive() const { return m_isActive; }
+bool MeetingState::isIndefinite() const { return m_isIndefinite; }
+int MeetingState::secondsRemaining() const { return m_secondsRemaining; }
+int MeetingState::totalSeconds() const { return m_totalSeconds; }
+QString MeetingState::reason() const { return m_reason; }
+void MeetingState::set(int secondsRemaining, int totalSeconds, const QString& reason) {
+  m_isActive = true;
+  m_isIndefinite = false;
+  m_secondsRemaining = secondsRemaining;
+  m_totalSeconds = totalSeconds;
+  m_reason = reason;
+  notifyChanged();
+}
+void MeetingState::setIndefinite(const QString& reason) {
+  m_isActive = true;
+  m_isIndefinite = true;
+  m_secondsRemaining = 0;
+  m_totalSeconds = 0;
+  m_reason = reason;
+  notifyChanged();
+}
+void MeetingState::clear() {
+  m_isActive = false;
+  m_isIndefinite = false;
+  m_secondsRemaining = 0;
+  m_totalSeconds = 0;
+  m_reason.clear();
+  notifyChanged();
+}
+void MeetingState::tickRemaining() {
+  m_secondsRemaining--;
+  notifyChanged();
+}
+void MeetingState::tickElapsed() {
+  m_totalSeconds++;
+  notifyChanged();
+}
+void MeetingState::subtractRemaining(int secs) {
+  m_secondsRemaining = std::max(0, m_secondsRemaining - secs);
+  notifyChanged();
+}
+void MeetingState::extend(int secs) {
+  m_secondsRemaining += secs;
+  m_totalSeconds += secs;
+  notifyChanged();
+}
+void MeetingState::notifyChanged() {
+  if (m_onChanged) m_onChanged();
+}
+
+void FocusState::setOnChanged(std::function<void()> onChanged) {
+  m_onChanged = std::move(onChanged);
+}
+bool FocusState::isActive() const { return m_isActive; }
+int FocusState::cyclesRemaining() const { return m_cyclesRemaining; }
+int FocusState::totalCycles() const { return m_totalCycles; }
+bool FocusState::entryBreakDone() const { return m_entryBreakDone; }
+int FocusState::spanId() const { return m_spanId; }
+void FocusState::start(int totalCycles) {
+  m_isActive = true;
+  m_entryBreakDone = false;
+  m_cyclesRemaining = totalCycles;
+  m_totalCycles = totalCycles;
+  m_completedSmallBreaks = 0;
+  notifyChanged();
+}
+void FocusState::end() {
+  clear();
+  notifyChanged();
+}
+void FocusState::setCyclesRemaining(int cycles) {
+  m_cyclesRemaining = cycles;
+  notifyChanged();
+}
+void FocusState::setSpanId(int id) { m_spanId = id; }
+int FocusState::smallBreaksBeforeBigBreak(const BreakConfig& config) const {
+  if (!config.bigEnabled) return -1;
+  return std::max(0, config.bigAfter - 1 - m_completedSmallBreaks);
+}
+BreakType FocusState::breakType(const BreakConfig& config) const {
+  if (!config.bigEnabled) return BreakType::Small;
+  return smallBreaksBeforeBigBreak(config) == 0 ? BreakType::Big : BreakType::Small;
+}
+void FocusState::resetCycle(bool notify) {
+  m_completedSmallBreaks = 0;
+  if (notify) notifyChanged();
+}
+void FocusState::makeNextBreakBig(const BreakConfig& config, bool notify) {
+  m_completedSmallBreaks = std::max(0, config.bigAfter - 1);
+  if (notify) notifyChanged();
+}
+void FocusState::makeNextBreakLastSmallBeforeBig(const BreakConfig& config,
+                                                 bool notify) {
+  m_completedSmallBreaks = std::max(0, config.bigAfter - 2);
+  if (notify) notifyChanged();
+}
+void FocusState::recordCompletedBreak(BreakType completedBreakType, bool notify) {
+  if (completedBreakType == BreakType::Big) {
+    m_completedSmallBreaks = 0;
+  } else {
+    m_completedSmallBreaks++;
+  }
+  if (notify) notifyChanged();
+}
+bool FocusState::advanceAfterCompletedBreak(bool notify) {
+  if (!m_isActive) return false;
+
+  bool changed = false;
+  bool completed = false;
+  if (m_entryBreakDone) {
+    m_cyclesRemaining--;
+    changed = true;
+    if (m_cyclesRemaining <= 0) {
+      clear();
+      completed = true;
+      changed = true;
     }
+  } else {
+    m_entryBreakDone = true;
+    changed = true;
+  }
+
+  if (changed && notify) notifyChanged();
+  return completed;
+}
+void FocusState::clear() {
+  m_isActive = false;
+  m_entryBreakDone = false;
+  m_cyclesRemaining = 0;
+  m_totalCycles = 0;
+  m_spanId = -1;
+  m_completedSmallBreaks = 0;
+}
+void FocusState::notifyChanged() {
+  if (m_onChanged) m_onChanged();
+}
+
+void PostBreakState::setPending(const BreakCompletion& completion) {
+  m_isActive = true;
+  m_breakType = completion.completedBreakType;
+  m_wasPostponed = completion.wasPostponed;
+  m_cycleResetThresholdSeconds = completion.cycleResetThresholdSeconds;
+  m_nextSessionBaseSeconds = completion.nextSessionBaseSeconds;
+  m_nextSessionAdjustedSeconds = completion.nextSessionAdjustedSeconds;
+  m_idleSeconds = 0;
+}
+bool PostBreakState::isActive() const { return m_isActive; }
+BreakType PostBreakState::breakType() const { return m_breakType; }
+bool PostBreakState::wasPostponed() const { return m_wasPostponed; }
+int PostBreakState::cycleResetThresholdSeconds() const {
+  return m_cycleResetThresholdSeconds;
+}
+int PostBreakState::nextSessionBaseSeconds() const { return m_nextSessionBaseSeconds; }
+int PostBreakState::nextSessionAdjustedSeconds() const {
+  return m_nextSessionAdjustedSeconds;
+}
+int PostBreakState::idleSeconds() const { return m_idleSeconds; }
+void PostBreakState::tickIdleSeconds() { addIdleSeconds(1); }
+void PostBreakState::addIdleSeconds(int secs) {
+  if (!m_isActive) return;
+  m_idleSeconds += secs;
+}
+void PostBreakState::clear() {
+  m_isActive = false;
+  m_breakType = BreakType::Small;
+  m_wasPostponed = false;
+  m_cycleResetThresholdSeconds = 0;
+  m_nextSessionBaseSeconds = 0;
+  m_nextSessionAdjustedSeconds = 0;
+  m_idleSeconds = 0;
+}
+
+BreakScheduleState& AppData::schedule() { return m_schedule; }
+const BreakScheduleState& AppData::schedule() const { return m_schedule; }
+PauseState& AppData::pause() { return m_pause; }
+const PauseState& AppData::pause() const { return m_pause; }
+MeetingState& AppData::meeting() { return m_meeting; }
+const MeetingState& AppData::meeting() const { return m_meeting; }
+FocusState& AppData::focus() { return m_focus; }
+const FocusState& AppData::focus() const { return m_focus; }
+PostBreakState& AppData::postBreak() { return m_postBreak; }
+const PostBreakState& AppData::postBreak() const { return m_postBreak; }
+
+BreakConfig AppData::currentBreakConfig() const {
+  if (m_focus.isActive()) {
+    return {
+        .smallEvery = preferences->focusSmallEvery->get(),
+        .smallFor = preferences->focusSmallFor->get(),
+        .bigEnabled = preferences->focusBigBreakEnabled->get(),
+        .bigAfter = preferences->focusBigAfter->get(),
+        .bigFor = preferences->focusBigFor->get(),
+    };
+  }
+  return {
+      .smallEvery = preferences->smallEvery->get(),
+      .smallFor = preferences->smallFor->get(),
+      .bigEnabled = preferences->bigBreakEnabled->get(),
+      .bigAfter = preferences->bigAfter->get(),
+      .bigFor = preferences->bigFor->get(),
+  };
+}
+BreakType AppData::breakType() const {
+  BreakConfig config = currentBreakConfig();
+  if (m_focus.isActive()) return m_focus.breakType(config);
+  return m_schedule.breakType(config);
+}
+int AppData::smallBreaksBeforeBigBreak() const {
+  BreakConfig config = currentBreakConfig();
+  if (m_focus.isActive()) return m_focus.smallBreaksBeforeBigBreak(config);
+  return m_schedule.smallBreaksBeforeBigBreak(config);
+}
+BreakCompletion AppData::completeBreak() {
+  m_postBreak.clear();
+  BreakConfig config = currentBreakConfig();
+  int cycleResetThresholdSeconds = std::max(0, config.bigFor - config.smallFor);
+  BreakCompletion completion = {
+      .completedBreakType = breakType(),
+      .wasPostponed = m_schedule.secondsPostponed() > 0,
+      .cycleResetThresholdSeconds = cycleResetThresholdSeconds,
+  };
+
+  if (m_focus.isActive()) {
+    m_focus.recordCompletedBreak(completion.completedBreakType, false);
+  } else {
+    m_schedule.recordCompletedBreak(completion.completedBreakType, false);
+  }
+  if (m_focus.isActive()) {
+    completion.focusCompleted = m_focus.advanceAfterCompletedBreak(false);
   }
   // Must come after focus clear: if focus just ended, effectiveSmallEvery()
   // returns the normal interval instead of the focus interval.
-  m_secondsToNextBreak = effectiveSmallEvery();
-  m_secondsToNextBreak -= m_postponeData.secondsPostponed() *
-                          preferences->postponeShrinkNextPercent->get() / 100;
-  m_postponeData.reset();
+  completion.nextSessionBaseSeconds = currentBreakConfig().smallEvery;
+  completion.nextSessionAdjustedSeconds =
+      completion.nextSessionBaseSeconds -
+      m_schedule.secondsPostponed() * preferences->postponeShrinkNextPercent->get() /
+          100;
+  m_schedule.setSecondsToNextBreak(completion.nextSessionAdjustedSeconds, false);
+  m_schedule.resetPostpone(false);
   emit changed();
-};
-int AppData::breakDuration() {
-  int totalSeconds =
-      breakType() == BreakType::Big ? effectiveBigFor() : effectiveSmallFor();
-  // If postponed, calculate extra seconds. Add zero otherwise.
-  int breakForReference =
-      effectiveBigBreakEnabled() ? effectiveBigFor() : effectiveSmallFor();
-  totalSeconds += preferences->postponeExtendBreakPercent->get() *
-                  m_postponeData.secondsPostponed() * breakForReference /
-                  effectiveSmallEvery() / 100;
-  return totalSeconds;
+  return completion;
 }
-bool AppData::isBreakExtendedByPostpone() {
-  return m_postponeData.secondsPostponed() > 0;
+int AppData::breakDuration() const {
+  return m_schedule.breakDuration(currentBreakConfig(),
+                                  preferences->postponeExtendBreakPercent->get());
 }
 void AppData::resetBreakCycle() {
-  m_breakCycleCount = 1;
-  emit changed();
-};
-void AppData::makeNextBreakBig() {
-  m_breakCycleCount = 0;
-  emit changed();
-};
-void AppData::makeNextBreakLastSmallBeforeBig() {
-  m_breakCycleCount = -1;
-  emit changed();
-};
-
-int AppData::secondsToNextBreak() { return m_secondsToNextBreak; };
-void AppData::tickSecondsToNextBreak() {
-  m_secondsToNextBreak--;
-  emit changed();
-};
-void AppData::resetSecondsToNextBreak() {
-  m_secondsToNextBreak = effectiveSmallEvery();
-  emit changed();
-};
-void AppData::setSecondsToNextBreak(int secs) {
-  m_secondsToNextBreak = secs;
-  emit changed();
-};
-void AppData::refillSecondsToNextBreak() {
-  if (m_secondsToNextBreak < effectiveSmallEvery()) {
-    m_secondsToNextBreak = effectiveSmallEvery();
-    emit changed();
+  if (m_focus.isActive()) {
+    m_focus.resetCycle();
+  } else {
+    m_schedule.resetCycle();
   }
-};
-void AppData::postpone(int secs) {
-  m_secondsToNextBreak += secs;
-  m_postponeData.plannedSecondsToPostpone = secs;
-  emit changed();
-};
-bool AppData::isPostponing() { return m_postponeData.isPostponing(); }
-void AppData::resetPostpone() {
-  m_postponeData.reset();
-  emit changed();
 }
-void AppData::earlyBreak() {
-  if (m_postponeData.isPostponing())
-    m_postponeData.actualSecondsToNextBreakWhenBreak = m_secondsToNextBreak;
-  m_secondsToNextBreak = 0;
-  emit changed();
-};
+void AppData::makeNextBreakBig() {
+  BreakConfig config = currentBreakConfig();
+  if (m_focus.isActive()) {
+    m_focus.makeNextBreakBig(config);
+  } else {
+    m_schedule.makeNextBreakBig(config);
+  }
+}
+void AppData::makeNextBreakLastSmallBeforeBig() {
+  BreakConfig config = currentBreakConfig();
+  if (m_focus.isActive()) {
+    m_focus.makeNextBreakLastSmallBeforeBig(config);
+  } else {
+    m_schedule.makeNextBreakLastSmallBeforeBig(config);
+  }
+}
+void AppData::finalizePendingPostBreak(bool resetCycle, bool undoPostponeShrink) {
+  if (!m_postBreak.isActive()) return;
 
-int AppData::secondsPaused() { return m_secondsPaused; };
-void AppData::tickSecondsPaused() { addSecondsPaused(1); };
-void AppData::addSecondsPaused(int secs) {
-  m_secondsPaused += secs;
-  emit changed();
-};
-void AppData::resetSecondsPaused() {
-  m_secondsPaused = 0;
-  emit changed();
-};
+  bool changedState = false;
 
-PauseReasons AppData::pauseReasons() { return m_pauseReasons; };
-void AppData::addPauseReasons(PauseReasons reason) {
-  m_pauseReasons |= reason;
-  emit changed();
-};
-void AppData::removePauseReasons(PauseReasons reason) {
-  m_pauseReasons &= ~reason;
-  emit changed();
-};
-void AppData::clearPauseReasons() {
-  m_pauseReasons = PauseReasons::fromInt(0);
-  emit changed();
-}
-void MeetingData::clear() {
-  isActive = false;
-  isIndefinite = false;
-  secondsRemaining = 0;
-  totalSeconds = 0;
-  reason.clear();
-}
-void FocusData::clear() {
-  isActive = false;
-  entryBreakDone = false;
-  cyclesRemaining = 0;
-  totalCycles = 0;
-  spanId = -1;
-}
-bool AppData::isInMeeting() const { return m_meetingData.isActive; }
-bool AppData::isMeetingIndefinite() const { return m_meetingData.isIndefinite; }
-int AppData::meetingSecondsRemaining() const { return m_meetingData.secondsRemaining; }
-int AppData::meetingTotalSeconds() const { return m_meetingData.totalSeconds; }
-QString AppData::meetingReason() const { return m_meetingData.reason; }
-void AppData::setMeetingData(int secondsRemaining, int totalSeconds,
-                             const QString& reason) {
-  m_meetingData.isActive = true;
-  m_meetingData.isIndefinite = false;
-  m_meetingData.secondsRemaining = secondsRemaining;
-  m_meetingData.totalSeconds = totalSeconds;
-  m_meetingData.reason = reason;
-  emit changed();
-}
-void AppData::setIndefiniteMeetingData(const QString& reason) {
-  m_meetingData.isActive = true;
-  m_meetingData.isIndefinite = true;
-  m_meetingData.secondsRemaining = 0;
-  m_meetingData.totalSeconds = 0;
-  m_meetingData.reason = reason;
-  emit changed();
-}
-void AppData::clearMeetingData() {
-  m_meetingData.clear();
-  emit changed();
-}
-void AppData::tickMeetingRemaining() {
-  m_meetingData.secondsRemaining--;
-  emit changed();
-}
-void AppData::tickMeetingElapsed() {
-  m_meetingData.totalSeconds++;
-  emit changed();
-}
-void AppData::subtractMeetingRemaining(int secs) {
-  m_meetingData.secondsRemaining = std::max(0, m_meetingData.secondsRemaining - secs);
-  emit changed();
-}
-void AppData::extendMeeting(int secs) {
-  m_meetingData.secondsRemaining += secs;
-  m_meetingData.totalSeconds += secs;
-  emit changed();
+  if (resetCycle) {
+    if (m_focus.isActive()) {
+      m_focus.resetCycle(false);
+      changedState = true;
+    } else {
+      int previousSmallBreaks =
+          m_schedule.smallBreaksBeforeBigBreak(currentBreakConfig());
+      m_schedule.resetCycle(false);
+      changedState = changedState ||
+                     previousSmallBreaks !=
+                         m_schedule.smallBreaksBeforeBigBreak(currentBreakConfig());
+    }
+  }
+
+  int nextSeconds = undoPostponeShrink ? m_postBreak.nextSessionBaseSeconds()
+                                       : m_postBreak.nextSessionAdjustedSeconds();
+  if (m_schedule.secondsToNextBreak() != nextSeconds) {
+    m_schedule.setSecondsToNextBreak(nextSeconds, false);
+    changedState = true;
+  }
+  m_postBreak.clear();
+
+  if (changedState) emit changed();
 }
 
-bool AppData::isFocusMode() const { return m_focusData.isActive; }
-int AppData::focusCyclesRemaining() const { return m_focusData.cyclesRemaining; }
-int AppData::focusTotalCycles() const { return m_focusData.totalCycles; }
-void AppData::startFocusMode(int totalCycles) {
-  m_focusData.isActive = true;
-  m_focusData.cyclesRemaining = totalCycles;
-  m_focusData.totalCycles = totalCycles;
-  emit changed();
-}
-void AppData::endFocusMode() {
-  m_focusData.clear();
-  emit changed();
-}
-void AppData::setFocusCyclesRemaining(int cycles) {
-  m_focusData.cyclesRemaining = cycles;
-  emit changed();
-}
-bool AppData::focusEntryBreakDone() const { return m_focusData.entryBreakDone; }
-int AppData::focusSpanId() const { return m_focusData.spanId; }
-void AppData::setFocusSpanId(int id) { m_focusData.spanId = id; }
-
-int AppData::effectiveSmallEvery() {
-  return m_focusData.isActive ? preferences->focusSmallEvery->get()
-                              : preferences->smallEvery->get();
-}
-int AppData::effectiveSmallFor() {
-  return m_focusData.isActive ? preferences->focusSmallFor->get()
-                              : preferences->smallFor->get();
-}
-bool AppData::effectiveBigBreakEnabled() {
-  return m_focusData.isActive ? preferences->focusBigBreakEnabled->get()
-                              : preferences->bigBreakEnabled->get();
-}
-int AppData::effectiveBigAfter() {
-  return m_focusData.isActive ? preferences->focusBigAfter->get()
-                              : preferences->bigAfter->get();
-}
-int AppData::effectiveBigFor() {
-  return m_focusData.isActive ? preferences->focusBigFor->get()
-                              : preferences->bigFor->get();
-}
-
-bool PostponeData::isPostponing() {
-  return plannedSecondsToPostpone - actualSecondsToNextBreakWhenBreak;
-}
+bool PostponeData::isPostponing() const { return secondsPostponed() > 0; }
 void PostponeData::reset() {
   plannedSecondsToPostpone = actualSecondsToNextBreakWhenBreak = 0;
 }
-int PostponeData::secondsPostponed() {
+int PostponeData::secondsPostponed() const {
   return std::max(0, plannedSecondsToPostpone - actualSecondsToNextBreakWhenBreak);
 }
 
