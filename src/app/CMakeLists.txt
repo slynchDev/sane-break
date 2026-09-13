@@ -65,6 +65,14 @@ qt_add_executable(
   sane-break-app MANUAL_FINALIZATION main.cpp ${CMAKE_SOURCE_DIR}/resources/index.qrc
 )
 target_link_libraries(sane-break-app PRIVATE sane-gui)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  find_package(
+    Qt6
+    COMPONENTS DBus
+    REQUIRED
+  )
+  target_link_libraries(sane-break-app PRIVATE Qt6::DBus)
+endif()
 
 include(cmake/translation.cmake)
 
