@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFontDatabase>
 #include <QLockFile>
@@ -25,10 +26,38 @@
 #include "core/preferences.h"
 
 #ifdef Q_OS_LINUX
+#include <QDBusConnection>
+#include <QDBusConnectionInterface>
+
 #include "lib/linux/system-check.h"
 #endif
 
+#ifdef Q_OS_LINUX
+// Qt probes the session bus for org.kde.StatusNotifierWatcher the first time
+// anything asks about the system tray and caches the answer for the life of
+// the process (isDBusTrayAvailable() in qgenericunixthemes.cpp). When the app
+// is launched alongside the panel at session start, that first probe can run
+// before the panel has claimed the name — and then no amount of retrying
+// QSystemTrayIcon::isSystemTrayAvailable() will ever see the tray. So wait for
+// the watcher name directly (an uncached query) before touching the tray API.
+bool waitForTrayWatcher(int timeoutMs) {
+  QDBusConnectionInterface* bus = QDBusConnection::sessionBus().interface();
+  if (bus == nullptr) return false;
+  QElapsedTimer elapsed;
+  elapsed.start();
+  while (!bus->isServiceRegistered("org.kde.StatusNotifierWatcher")) {
+    if (elapsed.elapsed() >= timeoutMs) return false;
+    QThread::msleep(250);
+  }
+  return true;
+}
+#endif
+
 bool waitForTray() {
+#ifdef Q_OS_LINUX
+  if (!waitForTrayWatcher(30000))
+    qWarning() << "No StatusNotifierWatcher on the session bus after 30s.";
+#endif
   for (int attempt = 0; attempt < 5; attempt++) {
     if (QSystemTrayIcon::isSystemTrayAvailable()) return true;
     QThread::sleep(1);
